@@ -43,18 +43,24 @@ p_pondéré = 1 / (1 + exp(-logit(p_pondéré)))
 ## Dashboard (haut à droite)
 
 ```
-Heure │ 16h30  │ Amp     │ 80 pts │ Vendredi │ Mai
-Type  │ Amp P75│ <=40%   │ <=50%  │ <=60%    │ Journée
-Brut  │ 158pts │  7%     │  17%   │   35%    │ attention
-Pond. │ 158pts │ 11%     │  28%   │   50%    │ ALERTE
+Heure   │ 16h30  │ Amp NY AM │ 80 pts  │ Vendredi │ Mai
+Type    │ Amp P75│  <=40%    │ <=50%   │ <=60%    │ Journée
+Brut    │ 158pts │   7%      │  17%    │  35%     │ attention
+Pond.   │ 158pts │  11%      │  28%    │  50%     │ ALERTE
+        │ Cont.  │ Retr ≥20% │ Retr≥40%│ Retr≥60% │              ← mini-header (à partir de 17h30)
+PM ≤50% │  83%   │   80%     │   55%   │   35%    │              ← bucket sélectionné + probas Section 3
+        │        │   30 pts  │  60 pts │  90 pts  │              ← amplitudes correspondantes
 ```
 
-| Ligne   | Contenu                                                                 |
-|---------|-------------------------------------------------------------------------|
-| Contexte | Heure du snapshot, amplitude mesurée, jour, mois (en bleu)             |
-| En-tête | Libellés des colonnes                                                   |
-| Brut    | Données source du PDF, en gris                                          |
-| Pondéré | Probabilités ajustées au contexte calendaire, colorées par seuil        |
+| Ligne          | Contenu                                                                       |
+|----------------|-------------------------------------------------------------------------------|
+| Contexte       | Heure du snapshot, amplitude NY AM mesurée, jour, mois (en bleu)              |
+| En-tête        | Libellés des colonnes (AM)                                                    |
+| Brut           | Données source du PDF, en gris                                                |
+| Pondéré        | Probabilités ajustées au contexte calendaire, colorées par seuil              |
+| Mini-header PM | Libellés des colonnes (PM), affichés à partir de 17h30                        |
+| Probas PM      | Continuation et retracement Section 3, selon bucket CAT1A déterminé par Pond. |
+| Amp PM         | Amplitudes en pts correspondant aux retracements (% × amp NY AM finale)       |
 
 **Code couleur ligne pondérée** :
 - ≤40% en **rouge** (le pire scénario directionnel)
@@ -62,7 +68,21 @@ Pond. │ 158pts │ 11%     │  28%   │   50%    │ ALERTE
 - ≤60% en **vert** (le seuil le plus permissif)
 - Label en vert / gold / rouge selon sévérité
 
-**Lecture rapide** : si la ligne pondérée est dominée par le rouge → on serre l'exposition. Si elle est verte/gold → contrarien sans contrainte particulière.
+**Code couleur lignes PM** :
+- Continuation : > 80% **rouge**, 70–80% **gold**, < 70% **vert** (haute = mauvaise nouvelle pour scalper bloqué à contresens)
+- Retracement : < 40% **rouge**, 40–60% **gold**, > 60% **vert** (haute = bonne nouvelle, fenêtre de sortie)
+
+**Mapping label pondéré → bucket Section 3** :
+
+| Label pondéré         | Bucket utilisé | Continuation | Retracement disponible |
+|-----------------------|----------------|--------------|------------------------|
+| très calme / calme / normal | référence (non unilatéral) | 71.8% | n/a |
+| attention             | ≤60%           | 82.4%        | 86 / 63 / 42% (≥20/40/60) |
+| ALERTE grosse amp.    | ≤60%           | 82.4%        | 86 / 63 / 42%          |
+| ALERTE                | ≤50%           | 83.0%        | 80 / 55 / 35%          |
+| ALERTE extreme        | ≤40%           | 81.7%        | 75 / 52 / 38%          |
+
+**Lecture rapide** : si la ligne pondérée est dominée par le rouge → on serre l'exposition. Si elle est verte/gold → contrarien sans contrainte particulière. À 17h30, la ligne PM dit jusqu'où on peut espérer un retracement pour sortir d'une position bloquée.
 
 ---
 
@@ -136,6 +156,18 @@ Les trois timings de capture sont automatiquement calculés à `+30`, `+60`, `+9
 ---
 
 ## Changelog
+
+### v1.1 - 2026-05-04
+
+- Snapshot supplémentaire à 17h30 : capture de l'amplitude finale NY AM
+- Renommage « Amp » → « Amp NY AM » pour clarifier la mesure
+- Nouveau bloc PM dans le dashboard (3 lignes affichées à partir de 17h30) :
+  - Mini-header (Cont. / Retr ≥20% / ≥40% / ≥60%)
+  - Probabilités Section 3 selon bucket CAT1A déterminé par le label pondéré
+  - Amplitudes en pts correspondant aux retracements
+- Coloration sémantique PM :
+  - Continuation : haute = mauvaise (rouge)
+  - Retracement : haute = bonne (vert)
 
 ### v1.0 - 2026-05-04
 

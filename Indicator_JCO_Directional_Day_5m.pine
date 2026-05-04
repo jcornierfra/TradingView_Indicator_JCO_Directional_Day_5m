@@ -1,19 +1,25 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 1.0
+// Version: 1.1
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
 // Description: Indicateur de risque directionnel NY AM base sur l'amplitude partielle
 //              de la session (15h30-17h00 Paris). A trois timings (16h00, 16h30, 17h00)
 //              il mesure l'amplitude high-low depuis 15h30 et croise avec les tableaux
 //              statistiques NQ 2023-2026 pour estimer :
-//              - 3 amplitudes de fin de session attendues (P25, P50, P75)
+//              - L'amplitude P75 attendue en fin de session NY AM
 //              - 3 probabilites directionnelles (CAT1A <=40%, <=50%, <=60%)
 //              - Un label de risque (tres calme -> ALERTE extreme)
 //              Les probabilites sont ponderees par log-odds avec les statistiques
 //              jour-de-semaine et mois (independance supposee).
-//              Dashboard en haut a droite : 4 lignes (contexte / en-tete / brut / pondere).
+//
+//              A 17h30, capture l'amplitude finale NY AM et affiche les statistiques
+//              de la session PM (continuation + retracement) selon le bucket CAT1A
+//              determine par le label pondere.
+//
+//              Dashboard en haut a droite : 7 lignes (contexte / en-tete / brut /
+//              pondere / mini-header PM / probas PM / amplitudes retracement PM).
 //
 // Source statistique : "NQ Risque directionnel et contrepartie" (Mai 2026)
 //                      856 jours · NQ M5 · 2 jan. 2023 - 30 avr. 2026
@@ -28,6 +34,17 @@
 //   <=60%     : pas de stat mensuelle dans le PDF, on extrapole via mon_le50 * 1.7
 //
 // Changelog:
+//   v1.1 - 2026-05-04
+//     - Snapshot supplementaire a 17h30 : capture de l'amplitude finale NY AM
+//     - Renommage "Amp" -> "Amp NY AM" pour clarifier la mesure
+//     - Nouveau bloc PM dans le dashboard (3 lignes affichees a partir de 17h30) :
+//       . Mini-header (Cont. / Retr >=20% / >=40% / >=60%)
+//       . Probabilites de continuation et retracement selon bucket CAT1A
+//         determine par le label pondere
+//       . Amplitudes correspondantes en pts (% retracement x amp NY AM finale)
+//     - Coloration : continuation (vert<70 / gold<80 / rouge sinon),
+//                    retracement (rouge<40 / gold<60 / vert sinon)
+//
 //   v1.0 - 2026-05-04
 //     - Initial release
 
@@ -119,6 +136,15 @@ var array<float> t3_le50 = array.from(0.09,  0.17,  0.20,  0.34,  0.30,  0.54)
 var array<float> t3_le60 = array.from(0.22,  0.30,  0.32,  0.49,  0.47,  0.79)
 var array<int>   t3_lbl  = array.from(0,     1,     2,     3,     5,     6)
 
+// Section 3 (page 13) : statistiques PM selon bucket CAT1A
+// Index : 0 = <=60%, 1 = <=50%, 2 = <=40%
+//         (le bucket "reference / non unilaterale" est gere separement)
+var array<float> sec3_cont   = array.from(0.824, 0.830, 0.817)  // continuation
+var array<float> sec3_retr20 = array.from(0.857, 0.799, 0.746)  // retracement >=20%
+var array<float> sec3_retr40 = array.from(0.626, 0.547, 0.521)  // retracement >=40%
+var array<float> sec3_retr60 = array.from(0.418, 0.346, 0.380)  // retracement >=60%
+SEC3_CONT_REF = 0.718  // continuation reference, tous jours
+
 // ── Couleurs (palette source + gold/orange plus fonce) ──────────────────────
 COL_GREEN  = #3fb950
 COL_YELLOW = #b8860b   // gold/orange plus fonce que #e3b341 du source
@@ -180,9 +206,9 @@ f_find_tranche(amp, max_arr) =>
     idx
 
 // Derive un index de label depuis la probabilite ponderee <=50%
-// Seuils choisis pour qu'un effet calendaire fort (ex. Ven x Mai) decale le label
-// d'au moins un cran par rapport au brut, tout en restant coherent avec les
-// labels source (cf. tableaux Timing 1/2/3 du PDF).
+// Seuils choisis pour qu'un effet calendaire fort, par exemple Ven x Mai,
+// decale le label d'au moins un cran par rapport au brut, tout en restant
+// coherent avec les labels source des tableaux Timing 1/2/3 du PDF.
 f_prob_to_label_idx(p50) =>
     if na(p50)
         -1
@@ -198,6 +224,36 @@ f_prob_to_label_idx(p50) =>
         4   // ALERTE
     else
         6   // ALERTE extreme
+
+// Mappe un label pondere vers un bucket Section 3
+// -1 = non unilaterale, utiliser SEC3_CONT_REF, retracements n/a
+//  0 = bucket <=60% (CAT1A modere)
+//  1 = bucket <=50% (CAT1A risque)
+//  2 = bucket <=40% (CAT1A tres risque)
+f_label_to_bucket(label_idx) =>
+    if label_idx == 3 or label_idx == 5         // attention, ALERTE grosse amp.
+        0
+    else if label_idx == 4                       // ALERTE
+        1
+    else if label_idx == 6                       // ALERTE extreme
+        2
+    else
+        -1
+
+f_bucket_label(bucket) =>
+    switch bucket
+        0  => "PM <=60%"
+        1  => "PM <=50%"
+        2  => "PM <=40%"
+        => "PM ref."
+
+// Coloration probabilite continuation : haute = mauvais pour scalper bloque
+f_color_cont(p) =>
+    na(p) ? color.gray : p < 0.70 ? COL_GREEN : p < 0.80 ? COL_YELLOW : COL_RED
+
+// Coloration probabilite retracement : haute = bonne (fenetre de sortie)
+f_color_retr(p) =>
+    na(p) ? color.gray : p < 0.40 ? COL_RED : p < 0.60 ? COL_YELLOW : COL_GREEN
 
 // Format minutes Paris -> "HHhMM"
 f_fmt_time(paris_total_min) =>
@@ -221,11 +277,13 @@ ny_total_min   = ny_hour * 60 + ny_min       // Paris
 t1_paris_total = ny_total_min + 30           // 16h00 si start=15h30
 t2_paris_total = ny_total_min + 60           // 16h30
 t3_paris_total = ny_total_min + 90           // 17h00
+t4_paris_total = ny_total_min + 120          // 17h30 - fin NY AM
 
 ny_utc      = f_paris_to_utc_min(time, ny_total_min)
 t1_utc      = f_paris_to_utc_min(time, t1_paris_total)
 t2_utc      = f_paris_to_utc_min(time, t2_paris_total)
 t3_utc      = f_paris_to_utc_min(time, t3_paris_total)
+t4_utc      = f_paris_to_utc_min(time, t4_paris_total)
 day_end_utc = f_day_end_utc_min(time)
 
 utc_h       = hour(time, "UTC")
@@ -242,7 +300,8 @@ var bool  sess_active    = false
 var float amp_t1         = na
 var float amp_t2         = na
 var float amp_t3         = na
-var int   timing_active  = 0    // 0=aucun, 1, 2, 3
+var float amp_t4         = na   // amplitude finale NY AM, capturee a 17h30
+var int   timing_active  = 0    // 0=aucun, 1, 2, 3, 4
 
 // Reset au nouveau jour TradingView
 if is_new_day
@@ -252,6 +311,7 @@ if is_new_day
     amp_t1        := na
     amp_t2        := na
     amp_t3        := na
+    amp_t4        := na
     timing_active := 0
 
 // Demarrage de la session (premier bar avec utc_total >= ny_utc)
@@ -272,6 +332,9 @@ if sess_active
     if utc_total >= t3_utc and na(amp_t3)
         amp_t3        := sess_h - sess_l
         timing_active := 3
+    if utc_total >= t4_utc and na(amp_t4)
+        amp_t4        := sess_h - sess_l
+        timing_active := 4
     sess_h := math.max(sess_h, high)
     sess_l := math.min(sess_l, low)
 
@@ -300,17 +363,21 @@ month_name = switch month_num
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
 if show_dash and barstate.islast
-    // Selectionner le timing actif
-    int t = timing_active
-    float amp = t == 1 ? amp_t1 : t == 2 ? amp_t2 : t == 3 ? amp_t3 : na
-    int capture_paris = t == 1 ? t1_paris_total : t == 2 ? t2_paris_total : t == 3 ? t3_paris_total : na
+    // t = timing affiche en ligne 0 (1..4). Apres 17h30, on affiche amp finale
+    // mais le lookup Timing reste fige sur le dernier proxy connu, T3, car
+    // les tables Timing sont calibrees sur des amplitudes partielles.
+    int t       = timing_active
+    int t_proxy = math.min(t, 3)
+    float amp_proxy = t_proxy == 1 ? amp_t1 : t_proxy == 2 ? amp_t2 : t_proxy == 3 ? amp_t3 : na
+    float amp = t == 4 ? amp_t4 : amp_proxy
+    int capture_paris = t == 4 ? t4_paris_total : t_proxy == 1 ? t1_paris_total : t_proxy == 2 ? t2_paris_total : t_proxy == 3 ? t3_paris_total : na
 
-    // Lookup tranche dans la table du timing actif
-    int idx = t == 1 ? f_find_tranche(amp, t1_max) : t == 2 ? f_find_tranche(amp, t2_max) : t == 3 ? f_find_tranche(amp, t3_max) : -1
+    // Lookup tranche dans la table du timing proxy (fige a T3 apres 17h30)
+    int idx = t_proxy == 1 ? f_find_tranche(amp_proxy, t1_max) : t_proxy == 2 ? f_find_tranche(amp_proxy, t2_max) : t_proxy == 3 ? f_find_tranche(amp_proxy, t3_max) : -1
 
-    // Valeurs brutes (lookup dans la table du timing actif)
-    // Seul P75 est affiche (raisonnement risque : "75% des jours equivalents
-    // ne depassent pas cette amplitude"). P25/P50 conserves dans les arrays
+    // Valeurs brutes (lookup dans la table du timing proxy)
+    // Seul P75 est affiche, raisonnement risque : 75% des jours equivalents
+    // ne depassent pas cette amplitude. P25/P50 conserves dans les arrays
     // sources si besoin futur, mais non lus ici.
     float b_p75  = na
     float b_le40 = na
@@ -318,19 +385,19 @@ if show_dash and barstate.islast
     float b_le60 = na
     int   b_lbl  = -1
 
-    if t == 1 and idx >= 0
+    if t_proxy == 1 and idx >= 0
         b_p75  := array.get(t1_p75,  idx)
         b_le40 := array.get(t1_le40, idx)
         b_le50 := array.get(t1_le50, idx)
         b_le60 := array.get(t1_le60, idx)
         b_lbl  := array.get(t1_lbl,  idx)
-    else if t == 2 and idx >= 0
+    else if t_proxy == 2 and idx >= 0
         b_p75  := array.get(t2_p75,  idx)
         b_le40 := array.get(t2_le40, idx)
         b_le50 := array.get(t2_le50, idx)
         b_le60 := array.get(t2_le60, idx)
         b_lbl  := array.get(t2_lbl,  idx)
-    else if t == 3 and idx >= 0
+    else if t_proxy == 3 and idx >= 0
         b_p75  := array.get(t3_p75,  idx)
         b_le40 := array.get(t3_le40, idx)
         b_le50 := array.get(t3_le50, idx)
@@ -355,12 +422,25 @@ if show_dash and barstate.islast
     w_lbl       = f_prob_to_label_idx(w_le50)
     w_lbl_color = f_label_color(w_lbl)
 
-    var table tbl = table.new(position.top_right, 6, 4, bgcolor=color.new(color.gray, 85), border_width=0)
+    // ── Section PM : statistiques continuation / retracement (Section 3 PDF) ─
+    bool pm_active = t == 4
+    int  bucket    = pm_active ? f_label_to_bucket(w_lbl) : -1
+    float pm_cont   = pm_active ? (bucket >= 0 ? array.get(sec3_cont,   bucket) : SEC3_CONT_REF) : na
+    float pm_retr20 = (pm_active and bucket >= 0) ? array.get(sec3_retr20, bucket) : na
+    float pm_retr40 = (pm_active and bucket >= 0) ? array.get(sec3_retr40, bucket) : na
+    float pm_retr60 = (pm_active and bucket >= 0) ? array.get(sec3_retr60, bucket) : na
+    // Amplitudes en pts gardees sur les memes conditions que les % retracement :
+    // si bucket non unilateral, retracements et amplitudes sont na ensemble
+    float pm_amp20  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.20 : na
+    float pm_amp40  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.40 : na
+    float pm_amp60  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.60 : na
+
+    var table tbl = table.new(position.top_right, 6, 7, bgcolor=color.new(color.gray, 85), border_width=0)
 
     // ── Ligne 0 : Contexte (valeurs du jour en bleu) ────────────────────────
     table.cell(tbl, 0, 0, "Heure",                   text_color=color.gray, text_size=size.small, text_halign=text.align_left)
     table.cell(tbl, 1, 0, f_fmt_time(capture_paris), text_color=COL_BLUE,   text_size=size.small)
-    table.cell(tbl, 2, 0, "Amp",                     text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 2, 0, "Amp NY AM",               text_color=color.gray, text_size=size.small, text_halign=text.align_left)
     table.cell(tbl, 3, 0, f_fmt_amp(amp),            text_color=COL_BLUE,   text_size=size.small)
     table.cell(tbl, 4, 0, dow_name,                  text_color=COL_BLUE,   text_size=size.small)
     table.cell(tbl, 5, 0, month_name,                text_color=COL_BLUE,   text_size=size.small)
@@ -388,3 +468,27 @@ if show_dash and barstate.islast
     table.cell(tbl, 3, 3, f_fmt_pct(w_le50),   text_color=COL_YELLOW, text_size=size.small)
     table.cell(tbl, 4, 3, f_fmt_pct(w_le60),   text_color=COL_GREEN,  text_size=size.small)
     table.cell(tbl, 5, 3, f_label_text(w_lbl), text_color=w_lbl_color, text_size=size.small)
+
+    // ── Ligne 4 : Mini-header PM, affichee a partir de 17h30 ────────────────
+    table.cell(tbl, 0, 4, "",                                      text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 4, pm_active ? "Cont."      : "",           text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 2, 4, pm_active ? "Retr >=20%" : "",           text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 3, 4, pm_active ? "Retr >=40%" : "",           text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 4, 4, pm_active ? "Retr >=60%" : "",           text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 5, 4, "",                                      text_color=color.gray, text_size=size.small)
+
+    // ── Ligne 5 : Probas PM (continuation + retracements) ───────────────────
+    table.cell(tbl, 0, 5, pm_active ? f_bucket_label(bucket) : "", text_color=color.gray,           text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 5, pm_active ? f_fmt_pct(pm_cont)     : "", text_color=f_color_cont(pm_cont), text_size=size.small)
+    table.cell(tbl, 2, 5, pm_active ? f_fmt_pct(pm_retr20)   : "", text_color=f_color_retr(pm_retr20), text_size=size.small)
+    table.cell(tbl, 3, 5, pm_active ? f_fmt_pct(pm_retr40)   : "", text_color=f_color_retr(pm_retr40), text_size=size.small)
+    table.cell(tbl, 4, 5, pm_active ? f_fmt_pct(pm_retr60)   : "", text_color=f_color_retr(pm_retr60), text_size=size.small)
+    table.cell(tbl, 5, 5, "",                                      text_color=color.gray, text_size=size.small)
+
+    // ── Ligne 6 : Amplitudes pts correspondant aux retracements ─────────────
+    table.cell(tbl, 0, 6, "",                                       text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 6, "",                                       text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 2, 6, pm_active ? f_fmt_amp(pm_amp20) : "",     text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 3, 6, pm_active ? f_fmt_amp(pm_amp40) : "",     text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 4, 6, pm_active ? f_fmt_amp(pm_amp60) : "",     text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 5, 6, "",                                       text_color=color.gray, text_size=size.small)
