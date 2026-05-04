@@ -1,5 +1,7 @@
 # JCO Directional Day
 
+![JCO Directional Day](screenshot.png)
+
 Indicateur TradingView Pine Script v6 d'évaluation du **risque directionnel intra-session** sur NQ Futures (Nasdaq 100), pour le scalp contrarien.
 
 À trois timings de la session NY AM (16h00, 16h30, 17h00 Paris), il mesure l'amplitude partielle réalisée depuis 15h30 et la croise avec les statistiques historiques NQ 2023–2026 pour estimer la probabilité que la journée devienne unilatérale, pondérée par le **jour de la semaine** et le **mois courant**.
