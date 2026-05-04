@@ -4,6 +4,10 @@ Indicateur TradingView Pine Script v6 d'évaluation du **risque directionnel int
 
 À trois timings de la session NY AM (16h00, 16h30, 17h00 Paris), il mesure l'amplitude partielle réalisée depuis 15h30 et la croise avec les statistiques historiques NQ 2023–2026 pour estimer la probabilité que la journée devienne unilatérale, pondérée par le **jour de la semaine** et le **mois courant**.
 
+À 17h30, capture l'amplitude finale NY AM et affiche les statistiques de la session PM (continuation + retracement) selon le bucket CAT1A déterminé par le label pondéré.
+
+Inclut également un greffon **FVG (Fair Value Gap)** qui repeint en jaune les bougies au centre d'un gap, avec filtre configurable sur la taille minimum.
+
 ---
 
 ## Principe
@@ -40,7 +44,7 @@ p_pondéré = 1 / (1 + exp(-logit(p_pondéré)))
 
 ---
 
-## Dashboard (haut à droite)
+## Dashboard (bas à droite, au-dessus du dashboard NY Amplitude Levels)
 
 ```
 Heure   │ 16h30  │ Amp NY AM │ 80 pts  │ Vendredi │ Mai
@@ -126,6 +130,21 @@ Les trois timings de capture sont automatiquement calculés à `+30`, `+60`, `+9
 ### Dashboard
 
 - **Afficher le dashboard** : afficher/masquer
+- **Lignes vides en bas** : nombre de lignes transparentes ajoutées sous le dashboard pour réserver la place à un dashboard secondaire empilé au même coin (`bottom_right`). Défaut **7**, réglable de 0 à 20. Mettre à 0 si l'indicateur tourne seul.
+
+### FVG (Fair Value Gap)
+
+- **Afficher les bougies FVG** : on/off (défaut on)
+- **Couleur du corps** : color picker (défaut jaune)
+- **Ecart minimum, en points** : filtre les petits gaps (défaut 5 pts)
+
+Pattern détecté sur trois bougies clôturées consécutives :
+- **Bullish FVG** : `low[1] > high[3]` — la bougie [2] est dans un trou haussier
+- **Bearish FVG** : `high[1] < low[3]` — la bougie [2] est dans un trou baissier
+
+La bougie [2] est repeinte en jaune via `barcolor(offset=-2)`. Détection avec **2 bougies de délai** (il faut que la bougie suivante soit clôturée pour confirmer le pattern).
+
+Note : `barcolor` colore la bougie entière (corps + mèches) car `plotcandle` ne supporte pas le paramètre `offset` en Pine v6.
 
 ---
 
@@ -156,6 +175,16 @@ Les trois timings de capture sont automatiquement calculés à `+30`, `+60`, `+9
 ---
 
 ## Changelog
+
+### v1.2 - 2026-05-04
+
+- Ajout d'un greffon **FVG** (Fair Value Gap) intégré à l'indicateur :
+  - Détection sur trois bougies clôturées consécutives
+  - Filtre configurable sur la taille minimum du gap, en points (défaut 1 pt)
+  - Repaint rétroactif de la bougie centrale en jaune via `barcolor(offset=-2)`
+- Dashboard repositionné de `top_right` à `bottom_right`
+- Nouveau paramètre **« Lignes vides en bas »** pour réserver la place à un dashboard secondaire empilé au même coin (typiquement *JCO NY Amplitude Levels*). Défaut 7, plage 0..20.
+- Refactor du fond du dashboard : table en `bgcolor` totalement transparent, fond gris appliqué cellule par cellule uniquement sur les 7 lignes utiles, ce qui rend les lignes de padding réellement invisibles.
 
 ### v1.1 - 2026-05-04
 
