@@ -1,0 +1,390 @@
+// This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
+// © jcornier
+//
+// Version: 1.0
+// GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
+//
+// Description: Indicateur de risque directionnel NY AM base sur l'amplitude partielle
+//              de la session (15h30-17h00 Paris). A trois timings (16h00, 16h30, 17h00)
+//              il mesure l'amplitude high-low depuis 15h30 et croise avec les tableaux
+//              statistiques NQ 2023-2026 pour estimer :
+//              - 3 amplitudes de fin de session attendues (P25, P50, P75)
+//              - 3 probabilites directionnelles (CAT1A <=40%, <=50%, <=60%)
+//              - Un label de risque (tres calme -> ALERTE extreme)
+//              Les probabilites sont ponderees par log-odds avec les statistiques
+//              jour-de-semaine et mois (independance supposee).
+//              Dashboard en haut a droite : 4 lignes (contexte / en-tete / brut / pondere).
+//
+// Source statistique : "NQ Risque directionnel et contrepartie" (Mai 2026)
+//                      856 jours · NQ M5 · 2 jan. 2023 - 30 avr. 2026
+//
+// Methode de ponderation (log-odds) :
+//   logit(p_pondere) = logit(p_base) + (logit(taux_jour)  - logit(taux_global))
+//                                    + (logit(taux_mois)  - logit(taux_global))
+//   p_pondere = 1 / (1 + exp(-logit(p_pondere)))
+//
+//   Avantages : reste borne dans [0,1], symetrie hausse/baisse, additif sur logits.
+//   Limite    : independance jour x mois supposee (non verifiee dans les donnees).
+//   <=60%     : pas de stat mensuelle dans le PDF, on extrapole via mon_le50 * 1.7
+//
+// Changelog:
+//   v1.0 - 2026-05-04
+//     - Initial release
+
+//@version=6
+indicator("JCO Directional Day", shorttitle="JCO Directional Day", overlay=true)
+
+// ── Session NY AM ────────────────────────────────────────────────────────────
+grp_sess = "Session NY AM"
+ny_hour  = input.int(15, "Heure debut NY AM (Paris)", minval=0, maxval=23, group=grp_sess)
+ny_min   = input.int(30, "Minute debut NY AM",         minval=0, maxval=59, group=grp_sess)
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+grp_dash  = "Dashboard"
+show_dash = input.bool(true, "Afficher le dashboard", group=grp_dash)
+
+// ── Detection heure d'ete Paris (CEST = GMT+2) ───────────────────────────────
+// Dernier dimanche de mars -> dernier dimanche d'octobre
+f_is_cest(t) =>
+    m   = month(t, "UTC")
+    d   = dayofmonth(t, "UTC")
+    dow = dayofweek(t, "UTC")
+    days_in_month = m == 2 ? (year(t,"UTC") % 4 == 0 ? 29 : 28) : (m == 4 or m == 6 or m == 9 or m == 11 ? 30 : 31)
+    last_sun_of_month = days_in_month - (dow - 1 + 7) % 7
+    last_sun_of_month := last_sun_of_month > days_in_month ? last_sun_of_month - 7 : last_sun_of_month
+    if m > 3 and m < 10
+        true
+    else if m == 3
+        d >= last_sun_of_month
+    else if m == 10
+        d < last_sun_of_month
+    else
+        false
+
+// Heure (en minutes UTC) d'un horaire Paris donne, gere le DST
+f_paris_to_utc_min(t, paris_total_min) =>
+    paris_offset_h = f_is_cest(t) ? 2 : 1
+    paris_total_min - paris_offset_h * 60
+
+// Fin de session = 22h Paris
+f_day_end_utc_min(t) =>
+    f_is_cest(t) ? 21 * 60 : 22 * 60
+
+// ── Statistiques (PDF "NQ Risque directionnel et contrepartie", Mai 2026) ───
+// Globaux (page 2, n=856 jours)
+GLOBAL_LE40 = 0.086
+GLOBAL_LE50 = 0.193
+GLOBAL_LE60 = 0.328
+
+// Jour de semaine (page 3) : Lun, Mar, Mer, Jeu, Ven
+var array<float> dow_le40 = array.from(0.094, 0.080, 0.099, 0.059, 0.101)
+var array<float> dow_le50 = array.from(0.205, 0.201, 0.180, 0.171, 0.207)
+var array<float> dow_le60 = array.from(0.368, 0.333, 0.331, 0.271, 0.337)
+
+// Mois (page 4) : Jan..Dec
+// <=60% non publie : on l'extrapole via mon_le50 * (GLOBAL_LE60 / GLOBAL_LE50)
+var array<float> month_le40 = array.from(0.047, 0.049, 0.023, 0.098, 0.103, 0.095, 0.119, 0.091, 0.094, 0.118, 0.127, 0.111)
+var array<float> month_le50 = array.from(0.118, 0.123, 0.163, 0.244, 0.294, 0.190, 0.164, 0.197, 0.141, 0.221, 0.286, 0.206)
+
+// Tables Timing (pages 7-8)
+// label_idx : 0=tres calme, 1=calme, 2=normal, 3=attention, 4=ALERTE, 5=grosse amp., 6=ALERTE extreme
+
+// Timing 1 - 16h00 (apres 30 min) : tranches 0-30 / 30-50 / 50-75 / 75-100 / >100
+var array<float> t1_max  = array.from(30.0,  50.0,  75.0,  100.0, 9999.0)
+var array<float> t1_p25  = array.from(47.0,  61.0,  85.0,  111.0, 166.0)
+var array<float> t1_p50  = array.from(58.0,  80.0,  105.0, 132.0, 212.0)
+var array<float> t1_p75  = array.from(75.0,  102.0, 127.0, 158.0, 269.0)
+var array<float> t1_le40 = array.from(0.09,  0.07,  0.07,  0.07,  0.15)
+var array<float> t1_le50 = array.from(0.17,  0.16,  0.18,  0.17,  0.29)
+var array<float> t1_le60 = array.from(0.27,  0.30,  0.30,  0.35,  0.42)
+var array<int>   t1_lbl  = array.from(0,     1,     2,     3,     4)
+
+// Timing 2 - 16h30 (apres 1h) : tranches 0-50 / 50-75 / 75-100 / 100-150 / >150
+var array<float> t2_max  = array.from(50.0,  75.0,  100.0, 150.0, 9999.0)
+var array<float> t2_p25  = array.from(48.0,  72.0,  93.0,  126.0, 201.0)
+var array<float> t2_p50  = array.from(58.0,  84.0,  106.0, 145.0, 246.0)
+var array<float> t2_p75  = array.from(71.0,  104.0, 128.0, 172.0, 314.0)
+var array<float> t2_le40 = array.from(0.06,  0.06,  0.07,  0.12,  0.16)
+var array<float> t2_le50 = array.from(0.12,  0.13,  0.21,  0.22,  0.33)
+var array<float> t2_le60 = array.from(0.22,  0.27,  0.34,  0.37,  0.50)
+var array<int>   t2_lbl  = array.from(0,     1,     2,     3,     4)
+
+// Timing 3 - 17h00 (apres 1h30) : tranches 0-75 / 75-100 / 100-150 / 150-200 / 200-300 / >300
+var array<float> t3_max  = array.from(75.0,  100.0, 150.0, 200.0, 300.0, 9999.0)
+var array<float> t3_p25  = array.from(54.0,  86.0,  118.0, 162.0, 224.0, 323.0)
+var array<float> t3_p50  = array.from(66.0,  96.0,  130.0, 184.0, 253.0, 378.0)
+var array<float> t3_p75  = array.from(77.0,  109.0, 143.0, 200.0, 279.0, 447.0)
+var array<float> t3_le40 = array.from(0.04,  0.07,  0.09,  0.19,  0.12,  0.25)
+var array<float> t3_le50 = array.from(0.09,  0.17,  0.20,  0.34,  0.30,  0.54)
+var array<float> t3_le60 = array.from(0.22,  0.30,  0.32,  0.49,  0.47,  0.79)
+var array<int>   t3_lbl  = array.from(0,     1,     2,     3,     5,     6)
+
+// ── Couleurs (palette source + gold/orange plus fonce) ──────────────────────
+COL_GREEN  = #3fb950
+COL_YELLOW = #b8860b   // gold/orange plus fonce que #e3b341 du source
+COL_RED    = #ff7b72
+COL_BLUE   = color.blue   // meme bleu que la ligne Midnight NY de l'indicateur source
+
+f_label_text(idx) =>
+    switch idx
+        0 => "tres calme"
+        1 => "calme"
+        2 => "normal"
+        3 => "attention"
+        4 => "ALERTE"
+        5 => "ALERTE grosse amp."
+        6 => "ALERTE extreme"
+        => "—"
+
+// Palette label : 3 couleurs (vert / gold / rouge)
+// 5 = ALERTE grosse amp. -> rouge (grosse amplitude = risque sur position deja en place,
+// meme si la directionalite n'est pas garantie)
+f_label_color(idx) =>
+    switch idx
+        0 => COL_GREEN
+        1 => COL_GREEN
+        2 => COL_YELLOW
+        3 => COL_YELLOW
+        4 => COL_RED
+        5 => COL_RED
+        6 => COL_RED
+        => color.gray
+
+// ── Helpers stats ────────────────────────────────────────────────────────────
+f_logit(p) =>
+    math.log(p / (1.0 - p))
+
+f_inv_logit(l) =>
+    1.0 / (1.0 + math.exp(-l))
+
+// Pondere une probabilite de base par les ratios jour-de-semaine et mois
+// via combinaison additive en log-odds
+f_adjust(p_base, day_rate, month_rate, global_rate) =>
+    if na(p_base) or p_base <= 0.0 or p_base >= 1.0
+        p_base
+    else
+        delta_day   = na(day_rate)   ? 0.0 : f_logit(day_rate)   - f_logit(global_rate)
+        delta_month = na(month_rate) ? 0.0 : f_logit(month_rate) - f_logit(global_rate)
+        f_inv_logit(f_logit(p_base) + delta_day + delta_month)
+
+// Trouve l'index de la tranche d'amplitude (-1 si na)
+f_find_tranche(amp, max_arr) =>
+    int idx = -1
+    if not na(amp)
+        n = array.size(max_arr)
+        for i = 0 to n - 1
+            if idx == -1 and amp <= array.get(max_arr, i)
+                idx := i
+        if idx == -1
+            idx := n - 1
+    idx
+
+// Derive un index de label depuis la probabilite ponderee <=50%
+// Seuils choisis pour qu'un effet calendaire fort (ex. Ven x Mai) decale le label
+// d'au moins un cran par rapport au brut, tout en restant coherent avec les
+// labels source (cf. tableaux Timing 1/2/3 du PDF).
+f_prob_to_label_idx(p50) =>
+    if na(p50)
+        -1
+    else if p50 < 0.12
+        0   // tres calme
+    else if p50 < 0.16
+        1   // calme
+    else if p50 < 0.20
+        2   // normal
+    else if p50 < 0.27
+        3   // attention
+    else if p50 < 0.45
+        4   // ALERTE
+    else
+        6   // ALERTE extreme
+
+// Format minutes Paris -> "HHhMM"
+f_fmt_time(paris_total_min) =>
+    if na(paris_total_min)
+        "—"
+    else
+        h = math.floor(paris_total_min / 60)
+        m = paris_total_min - h * 60
+        str.tostring(h) + "h" + (m < 10 ? "0" : "") + str.tostring(m)
+
+// Format probabilite [0,1] -> "X%"
+f_fmt_pct(p) =>
+    na(p) ? "—" : str.tostring(math.round(p * 100)) + "%"
+
+// Format amplitude -> "X pts"
+f_fmt_amp(amp) =>
+    na(amp) ? "—" : str.tostring(math.round(amp)) + " pts"
+
+// ── Calcul horaires UTC (selon DST) ──────────────────────────────────────────
+ny_total_min   = ny_hour * 60 + ny_min       // Paris
+t1_paris_total = ny_total_min + 30           // 16h00 si start=15h30
+t2_paris_total = ny_total_min + 60           // 16h30
+t3_paris_total = ny_total_min + 90           // 17h00
+
+ny_utc      = f_paris_to_utc_min(time, ny_total_min)
+t1_utc      = f_paris_to_utc_min(time, t1_paris_total)
+t2_utc      = f_paris_to_utc_min(time, t2_paris_total)
+t3_utc      = f_paris_to_utc_min(time, t3_paris_total)
+day_end_utc = f_day_end_utc_min(time)
+
+utc_h       = hour(time, "UTC")
+utc_m       = minute(time, "UTC")
+utc_total   = utc_h * 60 + utc_m
+
+is_new_day  = session.isfirstbar
+in_session  = utc_total >= ny_utc and utc_total < day_end_utc
+
+// ── Etat persistant ──────────────────────────────────────────────────────────
+var float sess_h         = na
+var float sess_l         = na
+var bool  sess_active    = false
+var float amp_t1         = na
+var float amp_t2         = na
+var float amp_t3         = na
+var int   timing_active  = 0    // 0=aucun, 1, 2, 3
+
+// Reset au nouveau jour TradingView
+if is_new_day
+    sess_h        := na
+    sess_l        := na
+    sess_active   := false
+    amp_t1        := na
+    amp_t2        := na
+    amp_t3        := na
+    timing_active := 0
+
+// Demarrage de la session (premier bar avec utc_total >= ny_utc)
+if in_session and not sess_active
+    sess_active := true
+    sess_h      := high
+    sess_l      := low
+
+// Pendant la session : snapshot AVANT d'agreger le bar courant,
+// puis on integre le bar courant a l'accumulateur high/low
+if sess_active
+    if utc_total >= t1_utc and na(amp_t1)
+        amp_t1        := sess_h - sess_l
+        timing_active := 1
+    if utc_total >= t2_utc and na(amp_t2)
+        amp_t2        := sess_h - sess_l
+        timing_active := 2
+    if utc_total >= t3_utc and na(amp_t3)
+        amp_t3        := sess_h - sess_l
+        timing_active := 3
+    sess_h := math.max(sess_h, high)
+    sess_l := math.min(sess_l, low)
+
+// ── Contexte calendaire (Paris) ──────────────────────────────────────────────
+dow_raw = dayofweek(time, "Europe/Paris")
+// Pine v6 : 1=Dim, 2=Lun, ..., 6=Ven, 7=Sam
+dow_idx = dow_raw == 2 ? 0 : dow_raw == 3 ? 1 : dow_raw == 4 ? 2 : dow_raw == 5 ? 3 : dow_raw == 6 ? 4 : -1
+dow_name = dow_idx == 0 ? "Lundi" : dow_idx == 1 ? "Mardi" : dow_idx == 2 ? "Mercredi" : dow_idx == 3 ? "Jeudi" : dow_idx == 4 ? "Vendredi" : "Week-end"
+
+month_num  = month(time, "Europe/Paris")
+month_idx  = month_num - 1
+month_name = switch month_num
+    1  => "Janvier"
+    2  => "Fevrier"
+    3  => "Mars"
+    4  => "Avril"
+    5  => "Mai"
+    6  => "Juin"
+    7  => "Juillet"
+    8  => "Aout"
+    9  => "Septembre"
+    10 => "Octobre"
+    11 => "Novembre"
+    12 => "Decembre"
+    => "—"
+
+// ── Dashboard ────────────────────────────────────────────────────────────────
+if show_dash and barstate.islast
+    // Selectionner le timing actif
+    int t = timing_active
+    float amp = t == 1 ? amp_t1 : t == 2 ? amp_t2 : t == 3 ? amp_t3 : na
+    int capture_paris = t == 1 ? t1_paris_total : t == 2 ? t2_paris_total : t == 3 ? t3_paris_total : na
+
+    // Lookup tranche dans la table du timing actif
+    int idx = t == 1 ? f_find_tranche(amp, t1_max) : t == 2 ? f_find_tranche(amp, t2_max) : t == 3 ? f_find_tranche(amp, t3_max) : -1
+
+    // Valeurs brutes (lookup dans la table du timing actif)
+    // Seul P75 est affiche (raisonnement risque : "75% des jours equivalents
+    // ne depassent pas cette amplitude"). P25/P50 conserves dans les arrays
+    // sources si besoin futur, mais non lus ici.
+    float b_p75  = na
+    float b_le40 = na
+    float b_le50 = na
+    float b_le60 = na
+    int   b_lbl  = -1
+
+    if t == 1 and idx >= 0
+        b_p75  := array.get(t1_p75,  idx)
+        b_le40 := array.get(t1_le40, idx)
+        b_le50 := array.get(t1_le50, idx)
+        b_le60 := array.get(t1_le60, idx)
+        b_lbl  := array.get(t1_lbl,  idx)
+    else if t == 2 and idx >= 0
+        b_p75  := array.get(t2_p75,  idx)
+        b_le40 := array.get(t2_le40, idx)
+        b_le50 := array.get(t2_le50, idx)
+        b_le60 := array.get(t2_le60, idx)
+        b_lbl  := array.get(t2_lbl,  idx)
+    else if t == 3 and idx >= 0
+        b_p75  := array.get(t3_p75,  idx)
+        b_le40 := array.get(t3_le40, idx)
+        b_le50 := array.get(t3_le50, idx)
+        b_le60 := array.get(t3_le60, idx)
+        b_lbl  := array.get(t3_lbl,  idx)
+
+    // Taux jour / mois (na si week-end ou hors timing)
+    day_le40_v = dow_idx >= 0 ? array.get(dow_le40, dow_idx) : na
+    day_le50_v = dow_idx >= 0 ? array.get(dow_le50, dow_idx) : na
+    day_le60_v = dow_idx >= 0 ? array.get(dow_le60, dow_idx) : na
+    mon_le40_v = array.get(month_le40, month_idx)
+    mon_le50_v = array.get(month_le50, month_idx)
+    // Extrapolation <=60% mensuel : mon_le50 * (GLOBAL_LE60 / GLOBAL_LE50)
+    mon_le60_v = mon_le50_v * (GLOBAL_LE60 / GLOBAL_LE50)
+
+    // Probabilites ponderees (log-odds)
+    w_le40 = f_adjust(b_le40, day_le40_v, mon_le40_v, GLOBAL_LE40)
+    w_le50 = f_adjust(b_le50, day_le50_v, mon_le50_v, GLOBAL_LE50)
+    w_le60 = f_adjust(b_le60, day_le60_v, mon_le60_v, GLOBAL_LE60)
+
+    // Label pondere : derive de la probabilite ponderee <=50%
+    w_lbl       = f_prob_to_label_idx(w_le50)
+    w_lbl_color = f_label_color(w_lbl)
+
+    var table tbl = table.new(position.top_right, 6, 4, bgcolor=color.new(color.gray, 85), border_width=0)
+
+    // ── Ligne 0 : Contexte (valeurs du jour en bleu) ────────────────────────
+    table.cell(tbl, 0, 0, "Heure",                   text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 0, f_fmt_time(capture_paris), text_color=COL_BLUE,   text_size=size.small)
+    table.cell(tbl, 2, 0, "Amp",                     text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 3, 0, f_fmt_amp(amp),            text_color=COL_BLUE,   text_size=size.small)
+    table.cell(tbl, 4, 0, dow_name,                  text_color=COL_BLUE,   text_size=size.small)
+    table.cell(tbl, 5, 0, month_name,                text_color=COL_BLUE,   text_size=size.small)
+
+    // ── Ligne 1 : En-tete ────────────────────────────────────────────────────
+    table.cell(tbl, 0, 1, "Type",    text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 1, "Amp P75", text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 2, 1, "<=40%",   text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 3, 1, "<=50%",   text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 4, 1, "<=60%",   text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 5, 1, "Journée", text_color=color.gray, text_size=size.small)
+
+    // ── Ligne 2 : Brut (gris) ────────────────────────────────────────────────
+    table.cell(tbl, 0, 2, "Brut",              text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 2, f_fmt_amp(b_p75),    text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 2, 2, f_fmt_pct(b_le40),   text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 3, 2, f_fmt_pct(b_le50),   text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 4, 2, f_fmt_pct(b_le60),   text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 5, 2, f_label_text(b_lbl), text_color=color.gray, text_size=size.small)
+
+    // ── Ligne 3 : Pondere (coloration par seuil : <=40 rouge, <=50 gold, <=60 vert) ──
+    table.cell(tbl, 0, 3, "Pond.",             text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+    table.cell(tbl, 1, 3, f_fmt_amp(b_p75),    text_color=color.gray, text_size=size.small)
+    table.cell(tbl, 2, 3, f_fmt_pct(w_le40),   text_color=COL_RED,    text_size=size.small)
+    table.cell(tbl, 3, 3, f_fmt_pct(w_le50),   text_color=COL_YELLOW, text_size=size.small)
+    table.cell(tbl, 4, 3, f_fmt_pct(w_le60),   text_color=COL_GREEN,  text_size=size.small)
+    table.cell(tbl, 5, 3, f_label_text(w_lbl), text_color=w_lbl_color, text_size=size.small)
