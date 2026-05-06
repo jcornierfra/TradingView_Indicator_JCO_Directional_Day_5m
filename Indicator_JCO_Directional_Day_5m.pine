@@ -1,7 +1,7 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 1.3
+// Version: 1.3.1
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
 // Description: Indicateur de risque directionnel NY AM base sur l'amplitude partielle
@@ -36,6 +36,10 @@
 //   <=60%     : pas de stat mensuelle dans le PDF, on extrapole via mon_le50 * 1.7
 //
 // Changelog:
+//   v1.3.1 - 2026-05-05
+//     - Dashboard simplifie : suppression du prefixe "Retr" sur les lignes
+//       de pourcentage. Le libelle "Retracement" en ligne 4 leve l'ambiguite.
+//
 //   v1.3 - 2026-05-05
 //     - Palette uniformisee avec l'indicateur JCO NY Amplitude Levels :
 //       . Vert #3fb950 (deja en place)
@@ -580,10 +584,10 @@ if dash_mode != "Masque" and barstate.islast
         table.cell(tbl_s, 0, 4, "Retracement",       bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
         table.cell(tbl_s, 1, 4, "",                  bgcolor=DASH_BG, text_size=size.small)
 
-        table.cell(tbl_s, 0, 5, "Retr >=20%",        bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 0, 5, ">=20%",             bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
         table.cell(tbl_s, 1, 5, pm_active ? f_fmt_pct(pm_retr20) : "—", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr20), text_size=size.small)
 
-        table.cell(tbl_s, 0, 6, "Retr >=40%",        bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 0, 6, ">=40%",             bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
         table.cell(tbl_s, 1, 6, pm_active ? f_fmt_pct(pm_retr40) : "—", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr40), text_size=size.small)
 
         // Padding transparent

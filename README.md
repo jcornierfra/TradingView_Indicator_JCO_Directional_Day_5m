@@ -192,6 +192,10 @@ Note : `barcolor` colore la bougie entière (corps + mèches) car `plotcandle` n
 
 ## Changelog
 
+### v1.3.1 - 2026-05-05
+
+- Dashboard simplifié : suppression du préfixe `Retr` sur les lignes de pourcentage. Le libellé `Retracement` en ligne 4 lève l'ambiguïté.
+
 ### v1.3 - 2026-05-05
 
 - Palette de couleurs uniformisée avec l'indicateur *JCO NY Amplitude Levels* :
