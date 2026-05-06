@@ -131,7 +131,21 @@ Les trois timings de capture sont automatiquement calculés à `+30`, `+60`, `+9
 
 ### Dashboard
 
-- **Afficher le dashboard** : afficher/masquer
+- **Mode d'affichage** : dropdown 3 options
+  - `Masque` — dashboard caché
+  - `Complet` — 6 colonnes × 7 lignes (contexte / en-tête / brut / pondéré / mini-header PM / probas PM / amplitudes PM)
+  - `Simplifie` — 2 colonnes × 7 lignes, version condensée pour lecture rapide :
+
+    ```
+    Amp. NY AM
+    228 pts
+    Journée
+    ALERTE
+    Retracement
+    Retr >=20%   80%
+    Retr >=40%   55%
+    ```
+
 - **Lignes vides en bas** : nombre de lignes transparentes ajoutées sous le dashboard pour réserver la place à un dashboard secondaire empilé au même coin (`bottom_right`). Défaut **7**, réglable de 0 à 20. Mettre à 0 si l'indicateur tourne seul.
 
 ### FVG (Fair Value Gap)
@@ -177,6 +191,14 @@ Note : `barcolor` colore la bougie entière (corps + mèches) car `plotcandle` n
 ---
 
 ## Changelog
+
+### v1.3 - 2026-05-05
+
+- Palette de couleurs uniformisée avec l'indicateur *JCO NY Amplitude Levels* :
+  - Vert `#3fb950` (déjà en place)
+  - Jaune assombri `#c99a2c` (était `#b8860b`)
+- Paramètre **« Afficher le dashboard »** remplacé par un dropdown **« Mode d'affichage »** à 3 options : `Masque` / `Complet` / `Simplifie`
+- Nouveau **dashboard simplifié** en 2 colonnes × 7 lignes pour lecture rapide pendant le scalp : amplitude NY AM, label Journée, et probabilités de retracement ≥20% / ≥40% en colonne
 
 ### v1.2 - 2026-05-04
 

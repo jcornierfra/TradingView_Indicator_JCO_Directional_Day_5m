@@ -1,7 +1,7 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 1.2
+// Version: 1.3
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
 // Description: Indicateur de risque directionnel NY AM base sur l'amplitude partielle
@@ -36,6 +36,21 @@
 //   <=60%     : pas de stat mensuelle dans le PDF, on extrapole via mon_le50 * 1.7
 //
 // Changelog:
+//   v1.3 - 2026-05-05
+//     - Palette uniformisee avec l'indicateur JCO NY Amplitude Levels :
+//       . Vert #3fb950 (deja en place)
+//       . Jaune assombri #c99a2c (etait #b8860b)
+//     - Parametre "Afficher le dashboard" remplace par un dropdown "Mode
+//       d'affichage" a 3 options : Masque / Complet / Simplifie
+//     - Nouveau dashboard SIMPLIFIE en 2 colonnes x 7 lignes :
+//         Amp. NY AM   |
+//         <valeur>     |
+//         Journee      |
+//         <label>      |
+//         Retracement  |
+//         Retr >=20%   | <%>
+//         Retr >=40%   | <%>
+//
 //   v1.2 - 2026-05-04
 //     - Ajout d'un greffon FVG : repeint les bougies "Fair Value Gap" via
 //       barcolor(offset=-2), retroactivement avec 2 bougies de delai.
@@ -78,8 +93,8 @@ ny_min   = input.int(30, "Minute debut NY AM",         minval=0, maxval=59, grou
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
 grp_dash     = "Dashboard"
-show_dash    = input.bool(true, "Afficher le dashboard",                                            group=grp_dash)
-dash_padding = input.int(7,    "Lignes vides en bas, reserve pour dashboard secondaire",  minval=0, maxval=20, group=grp_dash)
+dash_mode    = input.string("Complet", "Mode d'affichage",                       options=["Masque", "Complet", "Simplifie"], group=grp_dash)
+dash_padding = input.int(7,            "Lignes vides en bas, reserve pour dashboard secondaire",  minval=0, maxval=20, group=grp_dash)
 
 // ── FVG (Fair Value Gap) ─────────────────────────────────────────────────────
 grp_fvg     = "FVG"
@@ -172,9 +187,9 @@ var array<float> sec3_retr40 = array.from(0.626, 0.547, 0.521)  // retracement >
 var array<float> sec3_retr60 = array.from(0.418, 0.346, 0.380)  // retracement >=60%
 SEC3_CONT_REF = 0.718  // continuation reference, tous jours
 
-// ── Couleurs (palette source + gold/orange plus fonce) ──────────────────────
-COL_GREEN  = #3fb950
-COL_YELLOW = #b8860b   // gold/orange plus fonce que #e3b341 du source
+// ── Couleurs (palette uniforme avec l'indicateur JCO NY Amplitude Levels) ───
+COL_GREEN  = #3fb950   // vert utilise pour tous les elements verts
+COL_YELLOW = #c99a2c   // jaune assombri uniforme inter-indicateurs
 COL_RED    = #ff7b72
 COL_BLUE   = color.blue   // meme bleu que la ligne Midnight NY de l'indicateur source
 DASH_BG    = color.new(color.gray, 85)   // fond gris semi-transparent des cellules contenu
@@ -390,7 +405,7 @@ month_name = switch month_num
     => "—"
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
-if show_dash and barstate.islast
+if dash_mode != "Masque" and barstate.islast
     // t = timing affiche en ligne 0 (1..4). Apres 17h30, on affiche amp finale
     // mais le lookup Timing reste fige sur le dernier proxy connu, T3, car
     // les tables Timing sont calibrees sur des amplitudes partielles.
@@ -463,78 +478,119 @@ if show_dash and barstate.islast
     float pm_amp40  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.40 : na
     float pm_amp60  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.60 : na
 
+    // ──────────────────────────────────────────────────────────────────────
+    // MODE COMPLET : 6 colonnes x 7 lignes (+ padding)
+    // ──────────────────────────────────────────────────────────────────────
     // Table en bottom_right avec 7 lignes utiles + dash_padding lignes vides
     // en-dessous, pour reserver la place a un dashboard secondaire empile au
     // meme position (typiquement "JCO NY Amplitude Levels").
     // Important : le bgcolor de la table est totalement transparent. Le fond
     // gris est applique cellule par cellule (DASH_BG) uniquement sur les
     // lignes 0-6 ; les lignes de padding n'ont pas de bg.
-    var table tbl = table.new(position.bottom_right, 6, 7 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+    if dash_mode == "Complet"
+        var table tbl = table.new(position.bottom_right, 6, 7 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-    // ── Ligne 0 : Contexte (valeurs du jour en bleu) ────────────────────────
-    table.cell(tbl, 0, 0, "Heure",                   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 0, f_fmt_time(capture_paris), bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
-    table.cell(tbl, 2, 0, "Amp NY AM",               bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 3, 0, f_fmt_amp(amp),            bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
-    table.cell(tbl, 4, 0, dow_name,                  bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
-    table.cell(tbl, 5, 0, month_name,                bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
+        // ── Ligne 0 : Contexte (valeurs du jour en bleu) ────────────────────
+        table.cell(tbl, 0, 0, "Heure",                   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 0, f_fmt_time(capture_paris), bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
+        table.cell(tbl, 2, 0, "Amp NY AM",               bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 3, 0, f_fmt_amp(amp),            bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
+        table.cell(tbl, 4, 0, dow_name,                  bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
+        table.cell(tbl, 5, 0, month_name,                bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
 
-    // ── Ligne 1 : En-tete ────────────────────────────────────────────────────
-    table.cell(tbl, 0, 1, "Type",    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 1, "Amp P75", bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 2, 1, "<=40%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 3, 1, "<=50%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 4, 1, "<=60%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 5, 1, "Journée", bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // ── Ligne 1 : En-tete ──────────────────────────────────────────────
+        table.cell(tbl, 0, 1, "Type",    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 1, "Amp P75", bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 2, 1, "<=40%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 3, 1, "<=50%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 4, 1, "<=60%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 5, 1, "Journée", bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
 
-    // ── Ligne 2 : Brut (gris) ────────────────────────────────────────────────
-    table.cell(tbl, 0, 2, "Brut",              bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 2, f_fmt_amp(b_p75),    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 2, 2, f_fmt_pct(b_le40),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 3, 2, f_fmt_pct(b_le50),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 4, 2, f_fmt_pct(b_le60),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 5, 2, f_label_text(b_lbl), bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // ── Ligne 2 : Brut (gris) ──────────────────────────────────────────
+        table.cell(tbl, 0, 2, "Brut",              bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 2, f_fmt_amp(b_p75),    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 2, 2, f_fmt_pct(b_le40),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 3, 2, f_fmt_pct(b_le50),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 4, 2, f_fmt_pct(b_le60),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 5, 2, f_label_text(b_lbl), bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
 
-    // ── Ligne 3 : Pondere (coloration par seuil : <=40 rouge, <=50 gold, <=60 vert) ──
-    table.cell(tbl, 0, 3, "Pond.",             bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 3, f_fmt_amp(b_p75),    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 2, 3, f_fmt_pct(w_le40),   bgcolor=DASH_BG, text_color=COL_RED,    text_size=size.small)
-    table.cell(tbl, 3, 3, f_fmt_pct(w_le50),   bgcolor=DASH_BG, text_color=COL_YELLOW, text_size=size.small)
-    table.cell(tbl, 4, 3, f_fmt_pct(w_le60),   bgcolor=DASH_BG, text_color=COL_GREEN,  text_size=size.small)
-    table.cell(tbl, 5, 3, f_label_text(w_lbl), bgcolor=DASH_BG, text_color=w_lbl_color, text_size=size.small)
+        // ── Ligne 3 : Pondere (coloration par seuil : <=40 rouge, <=50 gold, <=60 vert) ──
+        table.cell(tbl, 0, 3, "Pond.",             bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 3, f_fmt_amp(b_p75),    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 2, 3, f_fmt_pct(w_le40),   bgcolor=DASH_BG, text_color=COL_RED,    text_size=size.small)
+        table.cell(tbl, 3, 3, f_fmt_pct(w_le50),   bgcolor=DASH_BG, text_color=COL_YELLOW, text_size=size.small)
+        table.cell(tbl, 4, 3, f_fmt_pct(w_le60),   bgcolor=DASH_BG, text_color=COL_GREEN,  text_size=size.small)
+        table.cell(tbl, 5, 3, f_label_text(w_lbl), bgcolor=DASH_BG, text_color=w_lbl_color, text_size=size.small)
 
-    // ── Ligne 4 : Mini-header PM, affichee a partir de 17h30 ────────────────
-    table.cell(tbl, 0, 4, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 4, pm_active ? "Cont."      : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 2, 4, pm_active ? "Retr >=20%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 3, 4, pm_active ? "Retr >=40%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 4, 4, pm_active ? "Retr >=60%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 5, 4, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // ── Ligne 4 : Mini-header PM, affichee a partir de 17h30 ───────────
+        table.cell(tbl, 0, 4, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 4, pm_active ? "Cont."      : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 2, 4, pm_active ? "Retr >=20%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 3, 4, pm_active ? "Retr >=40%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 4, 4, pm_active ? "Retr >=60%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 5, 4, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
 
-    // ── Ligne 5 : Probas PM (continuation + retracements) ───────────────────
-    table.cell(tbl, 0, 5, pm_active ? f_bucket_label(bucket) : "", bgcolor=DASH_BG, text_color=color.gray,           text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 5, pm_active ? f_fmt_pct(pm_cont)     : "", bgcolor=DASH_BG, text_color=f_color_cont(pm_cont), text_size=size.small)
-    table.cell(tbl, 2, 5, pm_active ? f_fmt_pct(pm_retr20)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr20), text_size=size.small)
-    table.cell(tbl, 3, 5, pm_active ? f_fmt_pct(pm_retr40)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr40), text_size=size.small)
-    table.cell(tbl, 4, 5, pm_active ? f_fmt_pct(pm_retr60)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr60), text_size=size.small)
-    table.cell(tbl, 5, 5, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // ── Ligne 5 : Probas PM (continuation + retracements) ──────────────
+        table.cell(tbl, 0, 5, pm_active ? f_bucket_label(bucket) : "", bgcolor=DASH_BG, text_color=color.gray,           text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 5, pm_active ? f_fmt_pct(pm_cont)     : "", bgcolor=DASH_BG, text_color=f_color_cont(pm_cont), text_size=size.small)
+        table.cell(tbl, 2, 5, pm_active ? f_fmt_pct(pm_retr20)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr20), text_size=size.small)
+        table.cell(tbl, 3, 5, pm_active ? f_fmt_pct(pm_retr40)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr40), text_size=size.small)
+        table.cell(tbl, 4, 5, pm_active ? f_fmt_pct(pm_retr60)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr60), text_size=size.small)
+        table.cell(tbl, 5, 5, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
 
-    // ── Ligne 6 : Amplitudes pts correspondant aux retracements ─────────────
-    table.cell(tbl, 0, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-    table.cell(tbl, 1, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 2, 6, pm_active ? f_fmt_amp(pm_amp20) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 3, 6, pm_active ? f_fmt_amp(pm_amp40) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 4, 6, pm_active ? f_fmt_amp(pm_amp60) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-    table.cell(tbl, 5, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // ── Ligne 6 : Amplitudes pts correspondant aux retracements ────────
+        table.cell(tbl, 0, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl, 1, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 2, 6, pm_active ? f_fmt_amp(pm_amp20) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 3, 6, pm_active ? f_fmt_amp(pm_amp40) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 4, 6, pm_active ? f_fmt_amp(pm_amp60) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        table.cell(tbl, 5, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
 
-    // ── Lignes de padding transparent ───────────────────────────────────────
-    // Reserve la place pour un dashboard secondaire empile au meme coin.
-    // Les cellules sont creees avec un texte vide et SANS bgcolor, donc invisibles
-    // (le bg de la table est lui aussi transparent).
-    if dash_padding > 0
-        for r = 7 to 7 + dash_padding - 1
-            for c = 0 to 5
-                table.cell(tbl, c, r, "", text_size=size.small)
+        // ── Lignes de padding transparent ─────────────────────────────────
+        if dash_padding > 0
+            for r = 7 to 7 + dash_padding - 1
+                for c = 0 to 5
+                    table.cell(tbl, c, r, "", text_size=size.small)
+
+    // ──────────────────────────────────────────────────────────────────────
+    // MODE SIMPLIFIE : 2 colonnes x 7 lignes (+ padding)
+    // ──────────────────────────────────────────────────────────────────────
+    //   Ligne 0 : libelle "Amp. NY AM"
+    //   Ligne 1 : valeur amplitude NY AM mesuree (bleu)
+    //   Ligne 2 : libelle "Journée"
+    //   Ligne 3 : label de journee, colore selon severite
+    //   Ligne 4 : libelle "Retracement"
+    //   Ligne 5 : "Retr >=20%" + valeur en pourcentage (couleur retracement)
+    //   Ligne 6 : "Retr >=40%" + valeur en pourcentage (couleur retracement)
+    if dash_mode == "Simplifie"
+        var table tbl_s = table.new(position.bottom_right, 2, 7 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+
+        table.cell(tbl_s, 0, 0, "Amp. NY AM",        bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 0, "",                  bgcolor=DASH_BG, text_size=size.small)
+
+        table.cell(tbl_s, 0, 1, f_fmt_amp(amp),      bgcolor=DASH_BG, text_color=COL_BLUE,    text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 1, "",                  bgcolor=DASH_BG, text_size=size.small)
+
+        table.cell(tbl_s, 0, 2, "Journée",           bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 2, "",                  bgcolor=DASH_BG, text_size=size.small)
+
+        table.cell(tbl_s, 0, 3, f_label_text(w_lbl), bgcolor=DASH_BG, text_color=w_lbl_color, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 3, "",                  bgcolor=DASH_BG, text_size=size.small)
+
+        table.cell(tbl_s, 0, 4, "Retracement",       bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 4, "",                  bgcolor=DASH_BG, text_size=size.small)
+
+        table.cell(tbl_s, 0, 5, "Retr >=20%",        bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 5, pm_active ? f_fmt_pct(pm_retr20) : "—", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr20), text_size=size.small)
+
+        table.cell(tbl_s, 0, 6, "Retr >=40%",        bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 6, pm_active ? f_fmt_pct(pm_retr40) : "—", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr40), text_size=size.small)
+
+        // Padding transparent
+        if dash_padding > 0
+            for r = 7 to 7 + dash_padding - 1
+                for c = 0 to 1
+                    table.cell(tbl_s, c, r, "", text_size=size.small)
 
 // ── Detection FVG ────────────────────────────────────────────────────────────
 // Pattern Fair Value Gap, evalue sur trois bougies cloturees consecutives :
