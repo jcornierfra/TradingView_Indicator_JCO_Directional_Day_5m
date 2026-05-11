@@ -1,91 +1,101 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 1.3.1
+// Version: 2.0.0
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
-// Description: Indicateur de risque directionnel NY AM base sur l'amplitude partielle
-//              de la session (15h30-17h00 Paris). A trois timings (16h00, 16h30, 17h00)
-//              il mesure l'amplitude high-low depuis 15h30 et croise avec les tableaux
-//              statistiques NQ 2023-2026 pour estimer :
-//              - L'amplitude P75 attendue en fin de session NY AM
-//              - 3 probabilites directionnelles (CAT1A <=40%, <=50%, <=60%)
-//              - Un label de risque (tres calme -> ALERTE extreme)
-//              Les probabilites sont ponderees par log-odds avec les statistiques
-//              jour-de-semaine et mois (independance supposee).
+// Description: Indicateur Risk Assessment NY AM bâti sur l'étude statistique
+//              "Anticiper les explosions sur la session NY AM" (Mai 2026,
+//              340 jours analysés, 46 explosions >= 200 pts c2).
 //
-//              A 17h30, capture l'amplitude finale NY AM et affiche les statistiques
-//              de la session PM (continuation + retracement) selon le bucket CAT1A
-//              determine par le label pondere.
+//              Objectif : à 15h30 Paris (= ouverture NY AM), classer la journée
+//              selon son risque d'explosion en 6 niveaux, sur la base d'un
+//              score composite a 5 leviers + 2 filtres extremes + 1 alerte
+//              tardive a 15h40.
 //
-//              Dashboard en bas a droite, 7 lignes utiles (contexte / en-tete /
-//              brut / pondere / mini-header PM / probas PM / amplitudes
-//              retracement PM), avec 7 lignes de padding transparent pour
-//              reserver la place a l'indicateur "JCO NY Amplitude Levels".
+//              Les 5 leviers du score composite :
+//                1a  pre_amp_pts     >= 240   +1   range pre-NY 14h00-15h30
+//                1b  pre_net_pts     <= -110  +1   net pre-NY 14h00-15h30
+//                3+  jeudi/vendredi          +1   levier calendaire
+//                3-  lundi                    -1   le seul levier negatif
+//                4   expl_count_5d   >= 2    +1   regime explosif recent
+//                5   position_14d    <= 32%  +1   proche du plus bas 14j
+//              Score total : -1 a +5.
 //
-// Source statistique : "NQ Risque directionnel et contrepartie" (Mai 2026)
-//                      856 jours · NQ M5 · 2 jan. 2023 - 30 avr. 2026
+//              Les 6 niveaux de risque :
+//                1  VERT 15h30      pre_amp<=130 ET expl_count_5d=0   P=0.0%
+//                2  ROUGE 15h30     pre_amp>=280 ET on_amp/h>=30      P=91.7%
+//                                   ET position_14d<=32
+//                3  Orange-faible   score <= 0                         P=8.1%
+//                4  Orange-moyen    score 1-2                          P=12.0%
+//                5  Orange-eleve    score >= 3                         P=19.4%
+//                6  ROUGE 15h45     orange ET b12_range >= 120         P=72.7%
+//                                   (alerte tardive a 15h40)
 //
-// Methode de ponderation (log-odds) :
-//   logit(p_pondere) = logit(p_base) + (logit(taux_jour)  - logit(taux_global))
-//                                    + (logit(taux_mois)  - logit(taux_global))
-//   p_pondere = 1 / (1 + exp(-logit(p_pondere)))
+//              Les 4 phases temporelles :
+//                Phase 1 (avant 14h00) : score "structurel", 3 leviers stables
+//                Phase 2 (14h00-15h30) : score provisoire, pre_amp/pre_net
+//                                        evoluent au fil des bougies M5
+//                Phase 3 (15h30)        : verrouillage, classification figee
+//                                         (Etat = verdict 15h30)
+//                Phase 4 (15h40)        : alerte tardive eventuelle, orange ->
+//                                         ROUGE 15h45 si b12_range >= 120
+//                                         (Etat ajuste = classification courante)
 //
-//   Avantages : reste borne dans [0,1], symetrie hausse/baisse, additif sur logits.
-//   Limite    : independance jour x mois supposee (non verifiee dans les donnees).
-//   <=60%     : pas de stat mensuelle dans le PDF, on extrapole via mon_le50 * 1.7
+//              Greffon FVG inchange depuis v1.2 : repeint en jaune les bougies
+//              au centre d'un "Fair Value Gap" (low[1]>high[3] ou high[1]<low[3]).
+//
+//              Dashboard en bas a droite, trois modes :
+//                - Masque    : pas d'affichage
+//                - Complet   : 11 lignes (Etat / Score / P(expl) / 5 leviers /
+//                              Etat ajuste). En 3 colonnes avec seuils par
+//                              defaut, ou 2 colonnes compactes avec couleur
+//                              des leviers indiquant leur validation.
+//                - Simplifie : 4 lignes (titre / Etat / P(expl) / Etat ajuste)
+//              Padding configurable pour empiler avec un dashboard secondaire.
+//
+// Source statistique : "NQ Anticipation des explosions sur NY AM" (Mai 2026,
+//                      340 jours · NQ M5 · 1 jan. 2025 - 8 mai 2026).
+//                      Calibration : train 2025 / test 2026 (hold-out).
+//
+// Detection c2 (cf. PDF, Definitions) :
+//   Une sequence de bougies M5 consecutives durant NY AM 15h30-17h30
+//   constitue une "explosion >= 200 c2" si :
+//     - |close_last - open_first| >= 200 pts
+//     - au maximum 2 bougies contraires dans la sequence
+//   Une bougie contraire est une bougie dont le corps va dans le sens
+//   oppose au mouvement net (close<open si mouvement haussier, etc.).
+//
+//   Algorithme : pour chaque jour passe, on collecte les ~24 bougies M5
+//   de la session AM, puis on cherche une paire (i,j) avec j>=i+2 telle que
+//   le critere c2 est rempli. Si oui, le jour est marque "explose".
 //
 // Changelog:
-//   v1.3.1 - 2026-05-05
-//     - Dashboard simplifie : suppression du prefixe "Retr" sur les lignes
-//       de pourcentage. Le libelle "Retracement" en ligne 4 leve l'ambiguite.
+//   v2.0.0 - 2026-05-11
+//     - REFONTE MAJEURE : remplacement integral du module statistique v1.x
+//       (tables Timing 1/2/3, Section 3, ponderation log-odds) par le module
+//       Risk Assessment base sur le score composite a 5 leviers + 2 filtres
+//       extremes + alerte tardive 15h45.
+//     - Detection exacte des explosions c2 (pas de proxy approximatif).
+//     - 6 niveaux de risque avec couleurs de fond dediees (du vert au rouge).
+//     - 4 phases d'affichage : structurel / provisoire / verrouille / ajuste.
+//     - Dashboard refondu :
+//       . Complet 3 colonnes (Label / Valeur / ✓✗+seuil), 11 lignes
+//       . Complet 2 colonnes compact (Label / Valeur coloree par levier)
+//       . Simplifie 2 colonnes x 4 lignes (titre / Etat / P(expl) / Etat ajuste)
+//     - Etat (verdict 15h30) et Etat ajuste (apres alerte 15h45 eventuelle)
+//       traites separement pour distinguer la classification initiale de
+//       la classification finale.
+//     - Conserves de v1.3.1 : header style, helpers DST, greffon FVG, palette
+//       de couleurs (vert #3fb950, jaune #c99a2c, rouge #ff7b72, bleu),
+//       structure dashboard (table transparente + padding configurable),
+//       dropdown Mode d'affichage Masque/Complet/Simplifie.
 //
-//   v1.3 - 2026-05-05
-//     - Palette uniformisee avec l'indicateur JCO NY Amplitude Levels :
-//       . Vert #3fb950 (deja en place)
-//       . Jaune assombri #c99a2c (etait #b8860b)
-//     - Parametre "Afficher le dashboard" remplace par un dropdown "Mode
-//       d'affichage" a 3 options : Masque / Complet / Simplifie
-//     - Nouveau dashboard SIMPLIFIE en 2 colonnes x 7 lignes :
-//         Amp. NY AM   |
-//         <valeur>     |
-//         Journee      |
-//         <label>      |
-//         Retracement  |
-//         Retr >=20%   | <%>
-//         Retr >=40%   | <%>
-//
-//   v1.2 - 2026-05-04
-//     - Ajout d'un greffon FVG : repeint les bougies "Fair Value Gap" via
-//       barcolor(offset=-2), retroactivement avec 2 bougies de delai.
-//       Pattern :
-//         . Bullish FVG : low[1] > high[3]
-//         . Bearish FVG : high[1] < low[3]
-//       Filtre configurable sur la taille minimum du gap, en points
-//       (defaut 1 pt).
-//       Note : barcolor colore la bougie entiere (corps + meches) car
-//       plotcandle ne supporte pas le parametre offset en Pine v6.
-//     - Dashboard repositionne de top_right a bottom_right
-//     - Nouveau parametre "Lignes vides en bas" pour reserver la place a un
-//       dashboard secondaire empile au meme coin (typiquement
-//       "JCO NY Amplitude Levels"). Defaut 7, plage 0..20.
-//     - Refactor du fond du dashboard : table en bgcolor totalement transparent,
-//       fond gris (DASH_BG) applique cellule par cellule sur les 7 lignes
-//       utiles uniquement, ce qui rend les lignes de padding reellement invisibles.
-//
-//   v1.1 - 2026-05-04
-//     - Snapshot supplementaire a 17h30 : capture de l'amplitude finale NY AM
-//     - Renommage "Amp" -> "Amp NY AM" pour clarifier la mesure
-//     - Nouveau bloc PM dans le dashboard (3 lignes affichees a partir de 17h30) :
-//       . Mini-header (Cont. / Retr >=20% / >=40% / >=60%)
-//       . Probabilites de continuation et retracement selon bucket CAT1A
-//         determine par le label pondere
-//       . Amplitudes correspondantes en pts (% retracement x amp NY AM finale)
-//     - Coloration : continuation (vert<70 / gold<80 / rouge sinon),
-//                    retracement (rouge<40 / gold<60 / vert sinon)
-//
-//   v1.0 - 2026-05-04
-//     - Initial release
+//   v1.3.1 - 2026-05-05  (Dashboard simplifie : suppression prefixe Retr)
+//   v1.3   - 2026-05-05  (Mode d'affichage dropdown + palette uniforme)
+//   v1.2   - 2026-05-04  (FVG + dashboard bottom_right + padding)
+//   v1.1   - 2026-05-04  (Section PM continuation / retracement a 17h30)
+//   v1.0   - 2026-05-04  (Initial release - module statistique CAT1A/Timing)
 
 //@version=6
 indicator("JCO Directional Day", shorttitle="JCO Directional Day", overlay=true)
@@ -96,15 +106,38 @@ ny_hour  = input.int(15, "Heure debut NY AM (Paris)", minval=0, maxval=23, group
 ny_min   = input.int(30, "Minute debut NY AM",         minval=0, maxval=59, group=grp_sess)
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
-grp_dash     = "Dashboard"
-dash_mode    = input.string("Complet", "Mode d'affichage",                       options=["Masque", "Complet", "Simplifie"], group=grp_dash)
-dash_padding = input.int(7,            "Lignes vides en bas, reserve pour dashboard secondaire",  minval=0, maxval=20, group=grp_dash)
+grp_dash             = "Dashboard"
+dash_mode            = input.string("Complet", "Mode d'affichage", options=["Masque", "Complet", "Simplifie"], group=grp_dash)
+dash_show_thresholds = input.bool(true, "Afficher les seuils en 3e colonne, mode Complet", group=grp_dash, tooltip="Si decoche : passage a 2 colonnes, et la couleur de chaque levier indique sa validation (vert = active, gris = non active).")
+dash_padding         = input.int(7, "Lignes vides en bas, reserve pour dashboard secondaire", minval=0, maxval=20, group=grp_dash)
 
 // ── FVG (Fair Value Gap) ─────────────────────────────────────────────────────
 grp_fvg     = "FVG"
-show_fvg    = input.bool(true,         "Afficher les bougies FVG",   group=grp_fvg)
-fvg_color   = input.color(color.yellow, "Couleur du corps",           group=grp_fvg)
-fvg_min_pts = input.int(1,             "Ecart minimum, en points",   minval=0, group=grp_fvg)
+show_fvg    = input.bool(true,          "Afficher les bougies FVG",  group=grp_fvg)
+fvg_color   = input.color(color.yellow, "Couleur du corps",          group=grp_fvg)
+fvg_min_pts = input.int(1,              "Ecart minimum, en points",  minval=0, group=grp_fvg)
+
+// ── Score composite ──────────────────────────────────────────────────────────
+grp_score = "Score composite"
+threshold_pre_amp_score = input.int(240,  "Seuil pre_amp pour +1 au score (pts)",                minval=0,  group=grp_score, tooltip="Range pre-NY 14h00-15h30. Levier 1a active si >= ce seuil.")
+threshold_pre_net_score = input.int(-110, "Seuil pre_net pour +1 au score (pts, valeur negative)", maxval=0, group=grp_score, tooltip="Net pre-NY 14h00-15h30. Levier 1b active si <= ce seuil (baissier).")
+threshold_expl_5d       = input.int(2,    "Nb explosions sur 5j pour +1 au score",               minval=0,  group=grp_score, tooltip="Levier 4 (regime explosif) active si expl_count_5d >= ce seuil.")
+threshold_position_14d  = input.int(32,   "Position dans range 14j (%) pour +1 au score",        minval=0, maxval=100, group=grp_score, tooltip="Levier 5 (proximite plus bas 14j) active si position <= ce seuil.")
+
+// ── Filtres extremes ─────────────────────────────────────────────────────────
+grp_filters = "Filtres extremes"
+threshold_vert_pre_amp    = input.int(130,    "Seuil pre_amp max pour filtre VERT (pts)",       minval=0,  group=grp_filters, tooltip="VERT 15h30 si pre_amp <= ce seuil ET expl_count_5d = 0.")
+threshold_rouge_pre_amp   = input.int(280,    "Seuil pre_amp min pour filtre ROUGE 15h30 (pts)", minval=0, group=grp_filters)
+threshold_rouge_on_amp_h  = input.float(30.0, "Seuil on_amp/h min pour ROUGE 15h30 (pts/heure)", minval=0,  group=grp_filters)
+threshold_rouge_pos_14d   = input.int(32,     "Seuil position_14d max pour ROUGE 15h30 (%)",    minval=0, maxval=100, group=grp_filters)
+threshold_rouge_15h45     = input.int(120,    "Seuil b12_range pour ROUGE 15h45 (pts)",         minval=0,  group=grp_filters, tooltip="Alerte tardive : si classification 15h30 etait Orange et b12_range (range des 2 premieres bougies AM) >= ce seuil, bascule en ROUGE 15h45.")
+
+// ── Parametres techniques ────────────────────────────────────────────────────
+grp_tech = "Techniques"
+explosion_threshold_pts   = input.int(200, "Seuil pts pour detecter une explosion c2",          minval=0, group=grp_tech, tooltip="|close_last - open_first| >= ce seuil sur la sequence.")
+explosion_max_contraries  = input.int(2,   "Max bougies contraires dans une sequence c2",       minval=0, group=grp_tech)
+position_window           = input.int(14,  "Fenetre du range structurel (jours)",                minval=1, group=grp_tech)
+regime_window             = input.int(5,   "Fenetre du compteur d'explosions recentes (jours)", minval=1, group=grp_tech)
 
 // ── Detection heure d'ete Paris (CEST = GMT+2) ───────────────────────────────
 // Dernier dimanche de mars -> dernier dimanche d'octobre
@@ -129,474 +162,582 @@ f_paris_to_utc_min(t, paris_total_min) =>
     paris_offset_h = f_is_cest(t) ? 2 : 1
     paris_total_min - paris_offset_h * 60
 
-// Fin de session = 22h Paris
-f_day_end_utc_min(t) =>
-    f_is_cest(t) ? 21 * 60 : 22 * 60
-
-// ── Statistiques (PDF "NQ Risque directionnel et contrepartie", Mai 2026) ───
-// Globaux (page 2, n=856 jours)
-GLOBAL_LE40 = 0.086
-GLOBAL_LE50 = 0.193
-GLOBAL_LE60 = 0.328
-
-// Jour de semaine (page 3) : Lun, Mar, Mer, Jeu, Ven
-var array<float> dow_le40 = array.from(0.094, 0.080, 0.099, 0.059, 0.101)
-var array<float> dow_le50 = array.from(0.205, 0.201, 0.180, 0.171, 0.207)
-var array<float> dow_le60 = array.from(0.368, 0.333, 0.331, 0.271, 0.337)
-
-// Mois (page 4) : Jan..Dec
-// <=60% non publie : on l'extrapole via mon_le50 * (GLOBAL_LE60 / GLOBAL_LE50)
-var array<float> month_le40 = array.from(0.047, 0.049, 0.023, 0.098, 0.103, 0.095, 0.119, 0.091, 0.094, 0.118, 0.127, 0.111)
-var array<float> month_le50 = array.from(0.118, 0.123, 0.163, 0.244, 0.294, 0.190, 0.164, 0.197, 0.141, 0.221, 0.286, 0.206)
-
-// Tables Timing (pages 7-8)
-// label_idx : 0=tres calme, 1=calme, 2=normal, 3=attention, 4=ALERTE, 5=grosse amp., 6=ALERTE extreme
-
-// Timing 1 - 16h00 (apres 30 min) : tranches 0-30 / 30-50 / 50-75 / 75-100 / >100
-var array<float> t1_max  = array.from(30.0,  50.0,  75.0,  100.0, 9999.0)
-var array<float> t1_p25  = array.from(47.0,  61.0,  85.0,  111.0, 166.0)
-var array<float> t1_p50  = array.from(58.0,  80.0,  105.0, 132.0, 212.0)
-var array<float> t1_p75  = array.from(75.0,  102.0, 127.0, 158.0, 269.0)
-var array<float> t1_le40 = array.from(0.09,  0.07,  0.07,  0.07,  0.15)
-var array<float> t1_le50 = array.from(0.17,  0.16,  0.18,  0.17,  0.29)
-var array<float> t1_le60 = array.from(0.27,  0.30,  0.30,  0.35,  0.42)
-var array<int>   t1_lbl  = array.from(0,     1,     2,     3,     4)
-
-// Timing 2 - 16h30 (apres 1h) : tranches 0-50 / 50-75 / 75-100 / 100-150 / >150
-var array<float> t2_max  = array.from(50.0,  75.0,  100.0, 150.0, 9999.0)
-var array<float> t2_p25  = array.from(48.0,  72.0,  93.0,  126.0, 201.0)
-var array<float> t2_p50  = array.from(58.0,  84.0,  106.0, 145.0, 246.0)
-var array<float> t2_p75  = array.from(71.0,  104.0, 128.0, 172.0, 314.0)
-var array<float> t2_le40 = array.from(0.06,  0.06,  0.07,  0.12,  0.16)
-var array<float> t2_le50 = array.from(0.12,  0.13,  0.21,  0.22,  0.33)
-var array<float> t2_le60 = array.from(0.22,  0.27,  0.34,  0.37,  0.50)
-var array<int>   t2_lbl  = array.from(0,     1,     2,     3,     4)
-
-// Timing 3 - 17h00 (apres 1h30) : tranches 0-75 / 75-100 / 100-150 / 150-200 / 200-300 / >300
-var array<float> t3_max  = array.from(75.0,  100.0, 150.0, 200.0, 300.0, 9999.0)
-var array<float> t3_p25  = array.from(54.0,  86.0,  118.0, 162.0, 224.0, 323.0)
-var array<float> t3_p50  = array.from(66.0,  96.0,  130.0, 184.0, 253.0, 378.0)
-var array<float> t3_p75  = array.from(77.0,  109.0, 143.0, 200.0, 279.0, 447.0)
-var array<float> t3_le40 = array.from(0.04,  0.07,  0.09,  0.19,  0.12,  0.25)
-var array<float> t3_le50 = array.from(0.09,  0.17,  0.20,  0.34,  0.30,  0.54)
-var array<float> t3_le60 = array.from(0.22,  0.30,  0.32,  0.49,  0.47,  0.79)
-var array<int>   t3_lbl  = array.from(0,     1,     2,     3,     5,     6)
-
-// Section 3 (page 13) : statistiques PM selon bucket CAT1A
-// Index : 0 = <=60%, 1 = <=50%, 2 = <=40%
-//         (le bucket "reference / non unilaterale" est gere separement)
-var array<float> sec3_cont   = array.from(0.824, 0.830, 0.817)  // continuation
-var array<float> sec3_retr20 = array.from(0.857, 0.799, 0.746)  // retracement >=20%
-var array<float> sec3_retr40 = array.from(0.626, 0.547, 0.521)  // retracement >=40%
-var array<float> sec3_retr60 = array.from(0.418, 0.346, 0.380)  // retracement >=60%
-SEC3_CONT_REF = 0.718  // continuation reference, tous jours
-
-// ── Couleurs (palette uniforme avec l'indicateur JCO NY Amplitude Levels) ───
-COL_GREEN  = #3fb950   // vert utilise pour tous les elements verts
-COL_YELLOW = #c99a2c   // jaune assombri uniforme inter-indicateurs
+// ── Palette de couleurs ──────────────────────────────────────────────────────
+// Reprise de v1.3 : couleurs uniformes avec l'indicateur JCO NY Amplitude Levels
+COL_GREEN  = #3fb950
+COL_YELLOW = #c99a2c
 COL_RED    = #ff7b72
-COL_BLUE   = color.blue   // meme bleu que la ligne Midnight NY de l'indicateur source
-DASH_BG    = color.new(color.gray, 85)   // fond gris semi-transparent des cellules contenu
+COL_BLUE   = color.blue
+COL_GRAY   = color.gray
+DASH_BG    = color.new(color.gray, 85)   // fond gris semi-transparent par defaut
 
-f_label_text(idx) =>
-    switch idx
-        0 => "tres calme"
-        1 => "calme"
-        2 => "normal"
-        3 => "attention"
-        4 => "ALERTE"
-        5 => "ALERTE grosse amp."
-        6 => "ALERTE extreme"
+// Couleurs des 6 niveaux de classification (de l'etude, page 10 du PDF)
+// Border : couleur forte pour le texte de l'etat ; Bg : version transparente pour le fond
+COL_CLASS_VERT       = #1D9E75
+COL_CLASS_O_FAIBLE   = #7DB249
+COL_CLASS_O_MOYEN    = #C8A437
+COL_CLASS_O_ELEVE    = #E89B2D
+COL_CLASS_ROUGE_15h45 = #D67340   // alerte tardive
+COL_CLASS_ROUGE_15h30 = #D24545
+
+// ── Helpers de formatage et de labelling ─────────────────────────────────────
+// Labels de classification. Les 3 niveaux Orange sont scindes sur 2 lignes
+// (Orange / faible|moyen|eleve) pour gagner en largeur dans le dashboard.
+f_class_text(c) =>
+    switch c
+        1 => "VERT 15h30"
+        2 => "ROUGE 15h30"
+        3 => "Orange\nfaible"
+        4 => "Orange\nmoyen"
+        5 => "Orange\neleve"
+        6 => "ROUGE 15h45"
         => "—"
 
-// Palette label : 3 couleurs (vert / gold / rouge)
-// 5 = ALERTE grosse amp. -> rouge (grosse amplitude = risque sur position deja en place,
-// meme si la directionalite n'est pas garantie)
-f_label_color(idx) =>
-    switch idx
-        0 => COL_GREEN
-        1 => COL_GREEN
-        2 => COL_YELLOW
-        3 => COL_YELLOW
-        4 => COL_RED
-        5 => COL_RED
-        6 => COL_RED
-        => color.gray
+// Version courte sans suffixe horaire. Utilisee pour la ligne "Etat ajuste"
+// afin d'eviter la confusion durant les semaines de transition DST ou les
+// horaires d'ouverture NY decalent par rapport au libelle.
+f_class_text_short(c) =>
+    switch c
+        1 => "VERT"
+        2 => "ROUGE"
+        3 => "Orange\nfaible"
+        4 => "Orange\nmoyen"
+        5 => "Orange\neleve"
+        6 => "ROUGE"
+        => "—"
 
-// ── Helpers stats ────────────────────────────────────────────────────────────
-f_logit(p) =>
-    math.log(p / (1.0 - p))
+f_class_color(c) =>
+    switch c
+        1 => COL_CLASS_VERT
+        2 => COL_CLASS_ROUGE_15h30
+        3 => COL_CLASS_O_FAIBLE
+        4 => COL_CLASS_O_MOYEN
+        5 => COL_CLASS_O_ELEVE
+        6 => COL_CLASS_ROUGE_15h45
+        => COL_GRAY
 
-f_inv_logit(l) =>
-    1.0 / (1.0 + math.exp(-l))
+f_class_bg(c) =>
+    switch c
+        1 => color.new(COL_CLASS_VERT,        85)
+        2 => color.new(COL_CLASS_ROUGE_15h30, 80)
+        3 => color.new(COL_CLASS_O_FAIBLE,    85)
+        4 => color.new(COL_CLASS_O_MOYEN,     85)
+        5 => color.new(COL_CLASS_O_ELEVE,     82)
+        6 => color.new(COL_CLASS_ROUGE_15h45, 80)
+        => DASH_BG
 
-// Pondere une probabilite de base par les ratios jour-de-semaine et mois
-// via combinaison additive en log-odds
-f_adjust(p_base, day_rate, month_rate, global_rate) =>
-    if na(p_base) or p_base <= 0.0 or p_base >= 1.0
-        p_base
-    else
-        delta_day   = na(day_rate)   ? 0.0 : f_logit(day_rate)   - f_logit(global_rate)
-        delta_month = na(month_rate) ? 0.0 : f_logit(month_rate) - f_logit(global_rate)
-        f_inv_logit(f_logit(p_base) + delta_day + delta_month)
+f_class_pexpl(c) =>
+    switch c
+        1 => 0.0
+        2 => 91.7
+        3 => 8.1
+        4 => 12.0
+        5 => 19.4
+        6 => 72.7
+        => na
 
-// Trouve l'index de la tranche d'amplitude (-1 si na)
-f_find_tranche(amp, max_arr) =>
-    int idx = -1
-    if not na(amp)
-        n = array.size(max_arr)
-        for i = 0 to n - 1
-            if idx == -1 and amp <= array.get(max_arr, i)
-                idx := i
-        if idx == -1
-            idx := n - 1
-    idx
+f_weekday_name(d) =>
+    d == 2 ? "Lundi" : d == 3 ? "Mardi" : d == 4 ? "Mercredi" : d == 5 ? "Jeudi" : d == 6 ? "Vendredi" : "Week-end"
 
-// Derive un index de label depuis la probabilite ponderee <=50%
-// Seuils choisis pour qu'un effet calendaire fort, par exemple Ven x Mai,
-// decale le label d'au moins un cran par rapport au brut, tout en restant
-// coherent avec les labels source des tableaux Timing 1/2/3 du PDF.
-f_prob_to_label_idx(p50) =>
-    if na(p50)
-        -1
-    else if p50 < 0.12
-        0   // tres calme
-    else if p50 < 0.16
-        1   // calme
-    else if p50 < 0.20
-        2   // normal
-    else if p50 < 0.27
-        3   // attention
-    else if p50 < 0.45
-        4   // ALERTE
-    else
-        6   // ALERTE extreme
+// Effet du jour de la semaine sur le score : jeudi/vendredi +1, lundi -1, sinon 0
+f_weekday_lever(d) =>
+    d == 5 or d == 6 ? 1 : d == 2 ? -1 : 0
 
-// Mappe un label pondere vers un bucket Section 3
-// -1 = non unilaterale, utiliser SEC3_CONT_REF, retracements n/a
-//  0 = bucket <=60% (CAT1A modere)
-//  1 = bucket <=50% (CAT1A risque)
-//  2 = bucket <=40% (CAT1A tres risque)
-f_label_to_bucket(label_idx) =>
-    if label_idx == 3 or label_idx == 5         // attention, ALERTE grosse amp.
-        0
-    else if label_idx == 4                       // ALERTE
-        1
-    else if label_idx == 6                       // ALERTE extreme
-        2
-    else
-        -1
+// Format integer
+f_fmt_i(x) =>
+    na(x) ? "—" : str.tostring(math.round(x))
 
-f_bucket_label(bucket) =>
-    switch bucket
-        0  => "PM <=60%"
-        1  => "PM <=50%"
-        2  => "PM <=40%"
-        => "PM ref."
+// Format en points
+f_fmt_pts(x) =>
+    na(x) ? "—" : str.tostring(math.round(x)) + " pts"
 
-// Coloration probabilite continuation : haute = mauvais pour scalper bloque
-f_color_cont(p) =>
-    na(p) ? color.gray : p < 0.70 ? COL_GREEN : p < 0.80 ? COL_YELLOW : COL_RED
+// Format pourcentage (1 decimale)
+f_fmt_pct1(x) =>
+    na(x) ? "—" : str.tostring(math.round(x * 10) / 10.0, "0.0") + "%"
 
-// Coloration probabilite retracement : haute = bonne (fenetre de sortie)
-f_color_retr(p) =>
-    na(p) ? color.gray : p < 0.40 ? COL_RED : p < 0.60 ? COL_YELLOW : COL_GREEN
+// Format float (1 decimale)
+f_fmt_f1(x) =>
+    na(x) ? "—" : str.tostring(math.round(x * 10) / 10.0, "0.0")
 
-// Format minutes Paris -> "HHhMM"
-f_fmt_time(paris_total_min) =>
-    if na(paris_total_min)
-        "—"
-    else
-        h = math.floor(paris_total_min / 60)
-        m = paris_total_min - h * 60
-        str.tostring(h) + "h" + (m < 10 ? "0" : "") + str.tostring(m)
+// Marqueur visuel d'activation d'un levier
+f_check_mark(b) =>
+    b ? "✓" : "✗"
 
-// Format probabilite [0,1] -> "X%"
-f_fmt_pct(p) =>
-    na(p) ? "—" : str.tostring(math.round(p * 100)) + "%"
+// Format signe : +1 / -1 / 0
+f_fmt_signed(x) =>
+    x > 0 ? "+" + str.tostring(x) : str.tostring(x)
 
-// Format amplitude -> "X pts"
-f_fmt_amp(amp) =>
-    na(amp) ? "—" : str.tostring(math.round(amp)) + " pts"
+// ── Detection d'explosion c2 (cf. PDF, definition stricte) ───────────────────
+// Cherche une paire (i, j) de bougies M5 avec j >= i+2 telle que
+// |close[j] - open[i]| >= threshold et au plus max_contr bougies contraires
+// dans la sequence [i..j]. Retourne true des qu'une explosion est trouvee.
+//
+// Complexite O(n^3) dans le pire cas. Pour n=24 (session AM), ~14k operations
+// au maximum, mais executee une seule fois par jour a 17h30 -> negligeable.
+f_detect_explosion_c2(o, h, l, c, threshold, max_contr) =>
+    int n = array.size(o)
+    bool explosed = false
+    // Attention : Pine v6 auto-inverse les bornes quand from > to (step
+    // implicite -1). On doit donc borner i a n-3 pour eviter que j = i+2
+    // depasse n-1 (qui declencherait un index out of bounds via auto-reverse).
+    if n >= 3
+        for i = 0 to n - 3
+            if not explosed
+                for j = i + 2 to n - 1
+                    if not explosed
+                        mvt = array.get(c, j) - array.get(o, i)
+                        if math.abs(mvt) >= threshold
+                            sign = mvt > 0 ? 1 : -1
+                            int contr = 0
+                            for k = i to j
+                                body = array.get(c, k) - array.get(o, k)
+                                if (sign > 0 and body < 0) or (sign < 0 and body > 0)
+                                    contr += 1
+                            if contr <= max_contr
+                                explosed := true
+    explosed
 
-// ── Calcul horaires UTC (selon DST) ──────────────────────────────────────────
-ny_total_min   = ny_hour * 60 + ny_min       // Paris
-t1_paris_total = ny_total_min + 30           // 16h00 si start=15h30
-t2_paris_total = ny_total_min + 60           // 16h30
-t3_paris_total = ny_total_min + 90           // 17h00
-t4_paris_total = ny_total_min + 120          // 17h30 - fin NY AM
+// ── Calcul des horaires UTC (selon DST) ──────────────────────────────────────
+// Toutes les bornes sont definies en heure Paris puis converties en UTC.
+ny_total_min        = ny_hour * 60 + ny_min     // 930 = 15h30 Paris
+pre_ny_start_paris  = 14 * 60                    // 840 = 14h00 Paris
+b2_close_paris      = ny_total_min + 10          // 940 = 15h40 Paris, B2 vient de fermer
+ny_end_paris        = ny_total_min + 120         // 1050 = 17h30 Paris
+overnight_start_par = 22 * 60 + 5                // 1325 = 22h05 Paris
 
-ny_utc      = f_paris_to_utc_min(time, ny_total_min)
-t1_utc      = f_paris_to_utc_min(time, t1_paris_total)
-t2_utc      = f_paris_to_utc_min(time, t2_paris_total)
-t3_utc      = f_paris_to_utc_min(time, t3_paris_total)
-t4_utc      = f_paris_to_utc_min(time, t4_paris_total)
-day_end_utc = f_day_end_utc_min(time)
+pre_ny_start_utc    = f_paris_to_utc_min(time, pre_ny_start_paris)
+ny_open_utc         = f_paris_to_utc_min(time, ny_total_min)
+b2_close_utc        = f_paris_to_utc_min(time, b2_close_paris)
+ny_end_utc          = f_paris_to_utc_min(time, ny_end_paris)
+overnight_start_utc = f_paris_to_utc_min(time, overnight_start_par)
 
-utc_h       = hour(time, "UTC")
-utc_m       = minute(time, "UTC")
-utc_total   = utc_h * 60 + utc_m
+utc_h     = hour(time, "UTC")
+utc_m     = minute(time, "UTC")
+utc_total = utc_h * 60 + utc_m
 
-is_new_day  = session.isfirstbar
-in_session  = utc_total >= ny_utc and utc_total < day_end_utc
+// Day tracking Paris : un day_id stable par jour calendaire Paris
+// Construit comme year*10000 + month*100 + dayofmonth, unique et sortable.
+day_id  = year(time, "Europe/Paris") * 10000 + month(time, "Europe/Paris") * 100 + dayofmonth(time, "Europe/Paris")
+weekday = dayofweek(time, "Europe/Paris")   // Pine v6 : 1=Dim, 2=Lun, ..., 6=Ven, 7=Sam
+
+// ── Range structurel 14 jours via daily timeframe ────────────────────────────
+// On recupere les highs/lows des 14 jours precedents (exclu aujourd'hui via [1])
+// depuis le timeframe Daily, malgre qu'on tourne sur M5.
+high_14d = request.security(syminfo.tickerid, "D", ta.highest(high[1], position_window))
+low_14d  = request.security(syminfo.tickerid, "D", ta.lowest(low[1],  position_window))
 
 // ── Etat persistant ──────────────────────────────────────────────────────────
-var float sess_h         = na
-var float sess_l         = na
-var bool  sess_active    = false
-var float amp_t1         = na
-var float amp_t2         = na
-var float amp_t3         = na
-var float amp_t4         = na   // amplitude finale NY AM, capturee a 17h30
-var int   timing_active  = 0    // 0=aucun, 1, 2, 3, 4
+// Accumulateur pre-NY (14h00 -> 15h25)
+var float pre_h = na
+var float pre_l = na
+var float pre_o = na
+var float pre_c = na
+var bool  pre_active = false
+var int   pre_ny_day = -1
 
-// Reset au nouveau jour TradingView
-if is_new_day
-    sess_h        := na
-    sess_l        := na
-    sess_active   := false
-    amp_t1        := na
-    amp_t2        := na
-    amp_t3        := na
-    amp_t4        := na
-    timing_active := 0
+// Snapshot pre-NY (final a 15h30)
+var float pre_amp_pts = na
+var float pre_net_pts = na
 
-// Demarrage de la session (premier bar avec utc_total >= ny_utc)
-if in_session and not sess_active
-    sess_active := true
-    sess_h      := high
-    sess_l      := low
+// Accumulateur overnight (22h05 J-1 -> 15h30 J), traverse minuit
+var float on_h = na
+var float on_l = na
+var bool  on_active = false
+var int   on_start_day = -1
 
-// Pendant la session : snapshot AVANT d'agreger le bar courant,
-// puis on integre le bar courant a l'accumulateur high/low
-if sess_active
-    if utc_total >= t1_utc and na(amp_t1)
-        amp_t1        := sess_h - sess_l
-        timing_active := 1
-    if utc_total >= t2_utc and na(amp_t2)
-        amp_t2        := sess_h - sess_l
-        timing_active := 2
-    if utc_total >= t3_utc and na(amp_t3)
-        amp_t3        := sess_h - sess_l
-        timing_active := 3
-    if utc_total >= t4_utc and na(amp_t4)
-        amp_t4        := sess_h - sess_l
-        timing_active := 4
-    sess_h := math.max(sess_h, high)
-    sess_l := math.min(sess_l, low)
+// Snapshot overnight (final a 15h30)
+var float on_amp_pts = na
+var float on_amp_per_hour = na
 
-// ── Contexte calendaire (Paris) ──────────────────────────────────────────────
-dow_raw = dayofweek(time, "Europe/Paris")
-// Pine v6 : 1=Dim, 2=Lun, ..., 6=Ven, 7=Sam
-dow_idx = dow_raw == 2 ? 0 : dow_raw == 3 ? 1 : dow_raw == 4 ? 2 : dow_raw == 5 ? 3 : dow_raw == 6 ? 4 : -1
-dow_name = dow_idx == 0 ? "Lundi" : dow_idx == 1 ? "Mardi" : dow_idx == 2 ? "Mercredi" : dow_idx == 3 ? "Jeudi" : dow_idx == 4 ? "Vendredi" : "Week-end"
+// Storage des bougies AM (15h30 -> 17h25, ~24 bougies M5)
+var array<float> am_opens  = array.new<float>(0)
+var array<float> am_highs  = array.new<float>(0)
+var array<float> am_lows   = array.new<float>(0)
+var array<float> am_closes = array.new<float>(0)
 
-month_num  = month(time, "Europe/Paris")
-month_idx  = month_num - 1
-month_name = switch month_num
-    1  => "Janvier"
-    2  => "Fevrier"
-    3  => "Mars"
-    4  => "Avril"
-    5  => "Mai"
-    6  => "Juin"
-    7  => "Juillet"
-    8  => "Aout"
-    9  => "Septembre"
-    10 => "Octobre"
-    11 => "Novembre"
-    12 => "Decembre"
-    => "—"
+// Snapshot 15h30 (NY open)
+var float ny_open_value     = na
+var float position_14d_pts  = na
+var int   ny_open_day       = -1
+var int   expl_count_5d     = 0
+
+// Snapshot 15h40 (B2 fermee) -> alerte tardive eventuelle
+var float b12_range = na
+var int   b2_close_day = -1
+
+// Detection c2 a 17h30 -> push dans l'historique des 5 derniers jours
+var array<bool> recent_expl_days = array.new<bool>(0)
+var int   ny_end_day = -1
+
+// Score & classification
+var int  score          = 0      // -1 a +5
+var int  classification = 0      // 0 = pas encore calcule, 1-6 = niveaux, peut basculer en 6 a 15h40
+var int  classification_15h30 = 0  // classification figee a 15h30, AVANT alerte tardive eventuelle
+var bool score_locked   = false  // true apres 15h30, false pendant pre-NY
+
+// Reset de la classification a 14h00 pour signaler "EN COURS"
+// (la classification finale n'est etablie qu'a 15h30)
+
+// ── Trigger 1 : pre-NY start (14h00 Paris) ──────────────────────────────────
+fire_pre_ny_start = utc_total == pre_ny_start_utc and day_id != pre_ny_day
+if fire_pre_ny_start
+    pre_ny_day := day_id
+    pre_active := true
+    pre_h := high
+    pre_l := low
+    pre_o := open
+    pre_c := close
+    // Reset de la classification : on entre en phase "EN COURS"
+    classification := 0
+    score_locked := false
+
+// Accumulation pre-NY pendant 14h00-15h25 (inclus)
+if pre_active and not fire_pre_ny_start and utc_total >= pre_ny_start_utc and utc_total < ny_open_utc and day_id == pre_ny_day
+    pre_h := math.max(pre_h, high)
+    pre_l := math.min(pre_l, low)
+    pre_c := close
+
+// ── Trigger 2 : overnight start (22h05 Paris) ───────────────────────────────
+fire_overnight_start = utc_total == overnight_start_utc and day_id != on_start_day
+if fire_overnight_start
+    on_start_day := day_id
+    on_active := true
+    on_h := high
+    on_l := low
+
+// Accumulation overnight (jusqu'au reset suivant a 15h30)
+if on_active and not fire_overnight_start
+    on_h := math.max(on_h, high)
+    on_l := math.min(on_l, low)
+
+// ── Push des bougies AM (15h35 -> 17h30) ────────────────────────────────────
+// On push la donnee de la bougie PRECEDENTE (bar[1]) car elle est confirmee.
+// Sur 24 bougies AM (15h30 -> 17h25), cela fait 24 push pendant les bars
+// 15h35 -> 17h30 (inclus).
+push_am = utc_total > ny_open_utc and utc_total <= ny_end_utc and day_id == ny_open_day
+if push_am
+    array.push(am_opens,  open[1])
+    array.push(am_highs,  high[1])
+    array.push(am_lows,   low[1])
+    array.push(am_closes, close[1])
+
+// ── Trigger 3 : NY open (15h30) — calcul final & classification ─────────────
+fire_ny_open = utc_total == ny_open_utc and day_id != ny_open_day
+if fire_ny_open
+    ny_open_day := day_id
+
+    // Snapshot pre-NY (range et net)
+    pre_amp_pts := pre_active ? pre_h - pre_l : na
+    pre_net_pts := pre_active ? pre_c - pre_o : na
+    pre_active := false
+
+    // Snapshot overnight (range et pts par heure)
+    // Duree fixe : 22h05 a 15h30 = 17h25 = 17.4167 heures
+    on_amp_pts := on_active ? on_h - on_l : na
+    on_amp_per_hour := not na(on_amp_pts) ? on_amp_pts / (17.0 + 25.0 / 60.0) : na
+    on_active := false
+
+    // Snapshot NY open value & position dans le range 14 jours
+    ny_open_value := open
+    range_14d_now = high_14d - low_14d
+    position_14d_pts := range_14d_now > 0 ? (ny_open_value - low_14d) / range_14d_now * 100 : 50.0
+
+    // Compter les explosions parmi les jours dans recent_expl_days
+    int count = 0
+    if array.size(recent_expl_days) > 0
+        for i = 0 to array.size(recent_expl_days) - 1
+            if array.get(recent_expl_days, i)
+                count += 1
+    expl_count_5d := count
+
+    // Calcul du score composite final
+    int s = 0
+    if not na(pre_amp_pts) and pre_amp_pts >= threshold_pre_amp_score
+        s += 1
+    if not na(pre_net_pts) and pre_net_pts <= threshold_pre_net_score
+        s += 1
+    s += f_weekday_lever(weekday)
+    if expl_count_5d >= threshold_expl_5d
+        s += 1
+    if not na(position_14d_pts) and position_14d_pts <= threshold_position_14d
+        s += 1
+    score := s
+
+    // Classification : filtres extremes d'abord, puis bandes du score
+    int c = 0
+    if not na(pre_amp_pts) and pre_amp_pts <= threshold_vert_pre_amp and expl_count_5d == 0
+        c := 1   // VERT 15h30
+    else if not na(pre_amp_pts) and not na(on_amp_per_hour) and not na(position_14d_pts) and pre_amp_pts >= threshold_rouge_pre_amp and on_amp_per_hour >= threshold_rouge_on_amp_h and position_14d_pts <= threshold_rouge_pos_14d
+        c := 2   // ROUGE 15h30
+    else if score <= 0
+        c := 3   // Orange-faible
+    else if score <= 2
+        c := 4   // Orange-moyen
+    else
+        c := 5   // Orange-eleve
+    classification := c
+    classification_15h30 := c  // copie figee, ne sera PAS modifiee par l'alerte 15h45
+    score_locked := true
+
+    // Reset du storage AM pour la nouvelle journee
+    array.clear(am_opens)
+    array.clear(am_highs)
+    array.clear(am_lows)
+    array.clear(am_closes)
+
+// ── Trigger 4 : B2 close (15h40) — alerte tardive eventuelle ────────────────
+fire_b2_close = utc_total == b2_close_utc and day_id != b2_close_day and day_id == ny_open_day
+if fire_b2_close
+    b2_close_day := day_id
+    // B1 = bougie 15h30-15h35 (bar[2] sur le 15h40)
+    // B2 = bougie 15h35-15h40 (bar[1] sur le 15h40)
+    b1_h = high[2]
+    b1_l = low[2]
+    b2_h = high[1]
+    b2_l = low[1]
+    b12_range := math.max(b1_h, b2_h) - math.min(b1_l, b2_l)
+
+    // Bascule ROUGE 15h45 si classification etait Orange (3/4/5) et b12_range >= seuil
+    if (classification == 3 or classification == 4 or classification == 5) and b12_range >= threshold_rouge_15h45
+        classification := 6   // ROUGE 15h45
+
+// ── Trigger 5 : NY end (17h30) — detection c2 + push historique ─────────────
+fire_ny_end = utc_total == ny_end_utc and day_id != ny_end_day and day_id == ny_open_day
+if fire_ny_end
+    ny_end_day := day_id
+    // push_am vient de pusher la derniere bougie (17h25) sur ce meme bar
+    // -> am_* arrays contiennent 24 bougies AM
+    explosed_today = f_detect_explosion_c2(am_opens, am_highs, am_lows, am_closes, explosion_threshold_pts, explosion_max_contraries)
+    array.push(recent_expl_days, explosed_today)
+    while array.size(recent_expl_days) > regime_window
+        array.shift(recent_expl_days)
+
+// ── Score provisoire pendant la pre-NY (14h00 -> 15h30) ─────────────────────
+// On recalcule a chaque bougie avec les valeurs partielles de pre_amp/pre_net
+// pour l'affichage en temps reel. Le score "structurel" avant 14h00 utilise
+// seulement les 3 leviers stables (weekday, expl_count_5d, position_14d).
+in_pre_ny_window = pre_active and utc_total >= pre_ny_start_utc and utc_total < ny_open_utc and day_id == pre_ny_day
+if in_pre_ny_window
+    // Valeurs partielles, recalcule sur chaque bougie y compris le bar 14h00
+    // ou pre_h/l/o/c viennent juste d'etre initialises par fire_pre_ny_start.
+    prov_pre_amp = pre_h - pre_l
+    prov_pre_net = pre_c - pre_o
+    // Position 14d estimee avec le close courant
+    range_14d_now = high_14d - low_14d
+    prov_pos_14d = range_14d_now > 0 ? (close - low_14d) / range_14d_now * 100 : 50.0
+    // Comptage explosions
+    int prov_count = 0
+    if array.size(recent_expl_days) > 0
+        for i = 0 to array.size(recent_expl_days) - 1
+            if array.get(recent_expl_days, i)
+                prov_count += 1
+    expl_count_5d := prov_count
+    // Score provisoire
+    int s = 0
+    if prov_pre_amp >= threshold_pre_amp_score
+        s += 1
+    if prov_pre_net <= threshold_pre_net_score
+        s += 1
+    s += f_weekday_lever(weekday)
+    if prov_count >= threshold_expl_5d
+        s += 1
+    if prov_pos_14d <= threshold_position_14d
+        s += 1
+    score := s
+    pre_amp_pts := prov_pre_amp
+    pre_net_pts := prov_pre_net
+    position_14d_pts := prov_pos_14d
+    score_locked := false
 
 // ── Dashboard ────────────────────────────────────────────────────────────────
+// Mode Masque : pas d'affichage. Mode Complet : 13 lignes. Mode Simplifie : 3 lignes.
+// Les deux modes ajoutent dash_padding lignes transparentes en bas pour empiler
+// un dashboard secondaire au meme coin (typiquement JCO NY Amplitude Levels).
 if dash_mode != "Masque" and barstate.islast
-    // t = timing affiche en ligne 0 (1..4). Apres 17h30, on affiche amp finale
-    // mais le lookup Timing reste fige sur le dernier proxy connu, T3, car
-    // les tables Timing sont calibrees sur des amplitudes partielles.
-    int t       = timing_active
-    int t_proxy = math.min(t, 3)
-    float amp_proxy = t_proxy == 1 ? amp_t1 : t_proxy == 2 ? amp_t2 : t_proxy == 3 ? amp_t3 : na
-    float amp = t == 4 ? amp_t4 : amp_proxy
-    int capture_paris = t == 4 ? t4_paris_total : t_proxy == 1 ? t1_paris_total : t_proxy == 2 ? t2_paris_total : t_proxy == 3 ? t3_paris_total : na
+    // Couleur de fond du panneau : reflet de la classification COURANTE
+    // (incluant donc une eventuelle bascule ROUGE 15h45). Permet la lecture
+    // visuelle rapide de l'urgence.
+    panel_bg = f_class_bg(classification)
 
-    // Lookup tranche dans la table du timing proxy (fige a T3 apres 17h30)
-    int idx = t_proxy == 1 ? f_find_tranche(amp_proxy, t1_max) : t_proxy == 2 ? f_find_tranche(amp_proxy, t2_max) : t_proxy == 3 ? f_find_tranche(amp_proxy, t3_max) : -1
+    // Etat (verdict 15h30) - figé apres l'open NY AM, ne bouge pas a 15h40
+    class_15h30_txt = classification_15h30 == 0 ? (in_pre_ny_window ? "EN COURS" : "—") : f_class_text(classification_15h30)
+    class_15h30_col = f_class_color(classification_15h30)
+    pexpl_15h30 = f_class_pexpl(classification_15h30)
 
-    // Valeurs brutes (lookup dans la table du timing proxy)
-    // Seul P75 est affiche, raisonnement risque : 75% des jours equivalents
-    // ne depassent pas cette amplitude. P25/P50 conserves dans les arrays
-    // sources si besoin futur, mais non lus ici.
-    float b_p75  = na
-    float b_le40 = na
-    float b_le50 = na
-    float b_le60 = na
-    int   b_lbl  = -1
+    // Etat ajuste (apres bascule 15h45 eventuelle) - visible a partir de 15h40
+    // Utilise f_class_text_short pour ne pas afficher le suffixe horaire
+    // (incompatible avec les semaines de transition DST).
+    past_b2_close = day_id == b2_close_day
+    adj_txt = past_b2_close ? f_class_text_short(classification) : "—"
+    adj_col = past_b2_close ? f_class_color(classification) : COL_GRAY
 
-    if t_proxy == 1 and idx >= 0
-        b_p75  := array.get(t1_p75,  idx)
-        b_le40 := array.get(t1_le40, idx)
-        b_le50 := array.get(t1_le50, idx)
-        b_le60 := array.get(t1_le60, idx)
-        b_lbl  := array.get(t1_lbl,  idx)
-    else if t_proxy == 2 and idx >= 0
-        b_p75  := array.get(t2_p75,  idx)
-        b_le40 := array.get(t2_le40, idx)
-        b_le50 := array.get(t2_le50, idx)
-        b_le60 := array.get(t2_le60, idx)
-        b_lbl  := array.get(t2_lbl,  idx)
-    else if t_proxy == 3 and idx >= 0
-        b_p75  := array.get(t3_p75,  idx)
-        b_le40 := array.get(t3_le40, idx)
-        b_le50 := array.get(t3_le50, idx)
-        b_le60 := array.get(t3_le60, idx)
-        b_lbl  := array.get(t3_lbl,  idx)
+    // Activation des leviers du score (pour les ticks ✓/✗ du detail)
+    lev_pre_amp = not na(pre_amp_pts) and pre_amp_pts >= threshold_pre_amp_score
+    lev_pre_net = not na(pre_net_pts) and pre_net_pts <= threshold_pre_net_score
+    lev_weekday = f_weekday_lever(weekday)
+    lev_expl_5d = expl_count_5d >= threshold_expl_5d
+    lev_pos_14d = not na(position_14d_pts) and position_14d_pts <= threshold_position_14d
 
-    // Taux jour / mois (na si week-end ou hors timing)
-    day_le40_v = dow_idx >= 0 ? array.get(dow_le40, dow_idx) : na
-    day_le50_v = dow_idx >= 0 ? array.get(dow_le50, dow_idx) : na
-    day_le60_v = dow_idx >= 0 ? array.get(dow_le60, dow_idx) : na
-    mon_le40_v = array.get(month_le40, month_idx)
-    mon_le50_v = array.get(month_le50, month_idx)
-    // Extrapolation <=60% mensuel : mon_le50 * (GLOBAL_LE60 / GLOBAL_LE50)
-    mon_le60_v = mon_le50_v * (GLOBAL_LE60 / GLOBAL_LE50)
+    if dash_mode == "Complet" and dash_show_thresholds
+        // ─── MODE COMPLET 3 COLONNES : Label | Valeur | Indicateur seuil ────
+        var table tbl_full = table.new(position.bottom_right, 3, 11 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-    // Probabilites ponderees (log-odds)
-    w_le40 = f_adjust(b_le40, day_le40_v, mon_le40_v, GLOBAL_LE40)
-    w_le50 = f_adjust(b_le50, day_le50_v, mon_le50_v, GLOBAL_LE50)
-    w_le60 = f_adjust(b_le60, day_le60_v, mon_le60_v, GLOBAL_LE60)
+        // Ligne 0 : Etat (verdict 15h30, fige)
+        table.cell(tbl_full, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 0, class_15h30_txt,   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_full, 2, 0, "",                bgcolor=panel_bg, text_size=size.small)
 
-    // Label pondere : derive de la probabilite ponderee <=50%
-    w_lbl       = f_prob_to_label_idx(w_le50)
-    w_lbl_color = f_label_color(w_lbl)
+        // Ligne 1 : Score
+        table.cell(tbl_full, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_full, 2, 1, "",                     bgcolor=panel_bg, text_size=size.small)
 
-    // ── Section PM : statistiques continuation / retracement (Section 3 PDF) ─
-    bool pm_active = t == 4
-    int  bucket    = pm_active ? f_label_to_bucket(w_lbl) : -1
-    float pm_cont   = pm_active ? (bucket >= 0 ? array.get(sec3_cont,   bucket) : SEC3_CONT_REF) : na
-    float pm_retr20 = (pm_active and bucket >= 0) ? array.get(sec3_retr20, bucket) : na
-    float pm_retr40 = (pm_active and bucket >= 0) ? array.get(sec3_retr40, bucket) : na
-    float pm_retr60 = (pm_active and bucket >= 0) ? array.get(sec3_retr60, bucket) : na
-    // Amplitudes en pts gardees sur les memes conditions que les % retracement :
-    // si bucket non unilateral, retracements et amplitudes sont na ensemble
-    float pm_amp20  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.20 : na
-    float pm_amp40  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.40 : na
-    float pm_amp60  = (pm_active and bucket >= 0 and not na(amp_t4)) ? amp_t4 * 0.60 : na
+        // Ligne 2 : P(expl)
+        table.cell(tbl_full, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_15h30),  bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_full, 2, 2, "",                       bgcolor=panel_bg, text_size=size.small)
 
-    // ──────────────────────────────────────────────────────────────────────
-    // MODE COMPLET : 6 colonnes x 7 lignes (+ padding)
-    // ──────────────────────────────────────────────────────────────────────
-    // Table en bottom_right avec 7 lignes utiles + dash_padding lignes vides
-    // en-dessous, pour reserver la place a un dashboard secondaire empile au
-    // meme position (typiquement "JCO NY Amplitude Levels").
-    // Important : le bgcolor de la table est totalement transparent. Le fond
-    // gris est applique cellule par cellule (DASH_BG) uniquement sur les
-    // lignes 0-6 ; les lignes de padding n'ont pas de bg.
-    if dash_mode == "Complet"
-        var table tbl = table.new(position.bottom_right, 6, 7 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        // Ligne 3 : separateur
+        table.cell(tbl_full, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+        table.cell(tbl_full, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+        table.cell(tbl_full, 2, 3, "", bgcolor=panel_bg, text_size=size.tiny)
 
-        // ── Ligne 0 : Contexte (valeurs du jour en bleu) ────────────────────
-        table.cell(tbl, 0, 0, "Heure",                   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 0, f_fmt_time(capture_paris), bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
-        table.cell(tbl, 2, 0, "Amp NY AM",               bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 3, 0, f_fmt_amp(amp),            bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
-        table.cell(tbl, 4, 0, dow_name,                  bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
-        table.cell(tbl, 5, 0, month_name,                bgcolor=DASH_BG, text_color=COL_BLUE,   text_size=size.small)
+        // Ligne 4 : pre_amp
+        table.cell(tbl_full, 0, 4, "pre_amp",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 4, f_check_mark(lev_pre_amp) + " (>= " + str.tostring(threshold_pre_amp_score) + ")", bgcolor=panel_bg, text_color=lev_pre_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // ── Ligne 1 : En-tete ──────────────────────────────────────────────
-        table.cell(tbl, 0, 1, "Type",    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 1, "Amp P75", bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 2, 1, "<=40%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 3, 1, "<=50%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 4, 1, "<=60%",   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 5, 1, "Journée", bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // Ligne 5 : pre_net
+        table.cell(tbl_full, 0, 5, "pre_net",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_net) + " (<= " + str.tostring(threshold_pre_net_score) + ")", bgcolor=panel_bg, text_color=lev_pre_net ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // ── Ligne 2 : Brut (gris) ──────────────────────────────────────────
-        table.cell(tbl, 0, 2, "Brut",              bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 2, f_fmt_amp(b_p75),    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 2, 2, f_fmt_pct(b_le40),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 3, 2, f_fmt_pct(b_le50),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 4, 2, f_fmt_pct(b_le60),   bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 5, 2, f_label_text(b_lbl), bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // Ligne 6 : weekday
+        table.cell(tbl_full, 0, 6, "weekday",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 6, f_weekday_name(weekday),            bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 6, f_fmt_signed(lev_weekday),          bgcolor=panel_bg, text_color=lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // ── Ligne 3 : Pondere (coloration par seuil : <=40 rouge, <=50 gold, <=60 vert) ──
-        table.cell(tbl, 0, 3, "Pond.",             bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 3, f_fmt_amp(b_p75),    bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 2, 3, f_fmt_pct(w_le40),   bgcolor=DASH_BG, text_color=COL_RED,    text_size=size.small)
-        table.cell(tbl, 3, 3, f_fmt_pct(w_le50),   bgcolor=DASH_BG, text_color=COL_YELLOW, text_size=size.small)
-        table.cell(tbl, 4, 3, f_fmt_pct(w_le60),   bgcolor=DASH_BG, text_color=COL_GREEN,  text_size=size.small)
-        table.cell(tbl, 5, 3, f_label_text(w_lbl), bgcolor=DASH_BG, text_color=w_lbl_color, text_size=size.small)
+        // Ligne 7 : expl_5d
+        table.cell(tbl_full, 0, 7, "expl_5d",                                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 7, str.tostring(expl_count_5d),               bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 7, f_check_mark(lev_expl_5d) + " (>= " + str.tostring(threshold_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // ── Ligne 4 : Mini-header PM, affichee a partir de 17h30 ───────────
-        table.cell(tbl, 0, 4, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 4, pm_active ? "Cont."      : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 2, 4, pm_active ? "Retr >=20%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 3, 4, pm_active ? "Retr >=40%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 4, 4, pm_active ? "Retr >=60%" : "",           bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 5, 4, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // Ligne 8 : pos_14d
+        table.cell(tbl_full, 0, 8, "pos_14d",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 8, f_fmt_pct1(position_14d_pts),       bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 8, f_check_mark(lev_pos_14d) + " (<= " + str.tostring(threshold_position_14d) + "%)", bgcolor=panel_bg, text_color=lev_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // ── Ligne 5 : Probas PM (continuation + retracements) ──────────────
-        table.cell(tbl, 0, 5, pm_active ? f_bucket_label(bucket) : "", bgcolor=DASH_BG, text_color=color.gray,           text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 5, pm_active ? f_fmt_pct(pm_cont)     : "", bgcolor=DASH_BG, text_color=f_color_cont(pm_cont), text_size=size.small)
-        table.cell(tbl, 2, 5, pm_active ? f_fmt_pct(pm_retr20)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr20), text_size=size.small)
-        table.cell(tbl, 3, 5, pm_active ? f_fmt_pct(pm_retr40)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr40), text_size=size.small)
-        table.cell(tbl, 4, 5, pm_active ? f_fmt_pct(pm_retr60)   : "", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr60), text_size=size.small)
-        table.cell(tbl, 5, 5, "",                                      bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // Ligne 9 : separateur
+        table.cell(tbl_full, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+        table.cell(tbl_full, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+        table.cell(tbl_full, 2, 9, "", bgcolor=panel_bg, text_size=size.tiny)
 
-        // ── Ligne 6 : Amplitudes pts correspondant aux retracements ────────
-        table.cell(tbl, 0, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl, 1, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 2, 6, pm_active ? f_fmt_amp(pm_amp20) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 3, 6, pm_active ? f_fmt_amp(pm_amp40) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 4, 6, pm_active ? f_fmt_amp(pm_amp60) : "",     bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
-        table.cell(tbl, 5, 6, "",                                       bgcolor=DASH_BG, text_color=color.gray, text_size=size.small)
+        // Ligne 10 : Etat ajuste (vert/rouge/orange-X apres 15h40, sinon tiret)
+        table.cell(tbl_full, 0, 10, "Etat ajuste",    bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 10, adj_txt,          bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+        table.cell(tbl_full, 2, 10, "",               bgcolor=panel_bg, text_size=size.small)
 
-        // ── Lignes de padding transparent ─────────────────────────────────
+        // Lignes de padding transparent
         if dash_padding > 0
-            for r = 7 to 7 + dash_padding - 1
-                for c = 0 to 5
-                    table.cell(tbl, c, r, "", text_size=size.small)
+            for r = 11 to 11 + dash_padding - 1
+                for c = 0 to 2
+                    table.cell(tbl_full, c, r, "", text_size=size.small)
 
-    // ──────────────────────────────────────────────────────────────────────
-    // MODE SIMPLIFIE : 2 colonnes x 7 lignes (+ padding)
-    // ──────────────────────────────────────────────────────────────────────
-    //   Ligne 0 : libelle "Amp. NY AM"
-    //   Ligne 1 : valeur amplitude NY AM mesuree (bleu)
-    //   Ligne 2 : libelle "Journée"
-    //   Ligne 3 : label de journee, colore selon severite
-    //   Ligne 4 : libelle "Retracement"
-    //   Ligne 5 : "Retr >=20%" + valeur en pourcentage (couleur retracement)
-    //   Ligne 6 : "Retr >=40%" + valeur en pourcentage (couleur retracement)
+    if dash_mode == "Complet" and not dash_show_thresholds
+        // ─── MODE COMPLET 2 COLONNES : Label | Valeur coloree selon levier ──
+        // La couleur de chaque valeur de levier indique son statut :
+        //   - vert  : levier active (contribue au score, sauf weekday lundi)
+        //   - rouge : weekday jeudi/vendredi (lever +1, donc augmente le risque)
+        //   - vert  : weekday lundi (lever -1, donc reduit le risque)
+        //   - gris  : levier non active / neutre
+        var table tbl_compact = table.new(position.bottom_right, 2, 11 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+
+        // Couleurs des leviers (col 1)
+        col_pre_amp = lev_pre_amp ? COL_GREEN : COL_GRAY
+        col_pre_net = lev_pre_net ? COL_GREEN : COL_GRAY
+        col_weekday = lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY
+        col_expl_5d = lev_expl_5d ? COL_GREEN : COL_GRAY
+        col_pos_14d = lev_pos_14d ? COL_GREEN : COL_GRAY
+
+        // Ligne 0 : Etat
+        table.cell(tbl_compact, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 0, class_15h30_txt,   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+
+        // Ligne 1 : Score
+        table.cell(tbl_compact, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+
+        // Ligne 2 : P(expl)
+        table.cell(tbl_compact, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_15h30),  bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+
+        // Ligne 3 : separateur
+        table.cell(tbl_compact, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+        table.cell(tbl_compact, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+
+        // Ligne 4 : pre_amp
+        table.cell(tbl_compact, 0, 4, "pre_amp",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=col_pre_amp, text_size=size.small)
+
+        // Ligne 5 : pre_net
+        table.cell(tbl_compact, 0, 5, "pre_net",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=col_pre_net, text_size=size.small)
+
+        // Ligne 6 : weekday
+        table.cell(tbl_compact, 0, 6, "weekday",                bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 6, f_weekday_name(weekday),  bgcolor=panel_bg, text_color=col_weekday, text_size=size.small)
+
+        // Ligne 7 : expl_5d
+        table.cell(tbl_compact, 0, 7, "expl_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 7, str.tostring(expl_count_5d),     bgcolor=panel_bg, text_color=col_expl_5d, text_size=size.small)
+
+        // Ligne 8 : pos_14d
+        table.cell(tbl_compact, 0, 8, "pos_14d",                  bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 8, f_fmt_pct1(position_14d_pts), bgcolor=panel_bg, text_color=col_pos_14d, text_size=size.small)
+
+        // Ligne 9 : separateur
+        table.cell(tbl_compact, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+        table.cell(tbl_compact, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+
+        // Ligne 10 : Etat ajuste
+        table.cell(tbl_compact, 0, 10, "Etat ajuste", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 10, adj_txt,       bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+
+        // Lignes de padding transparent
+        if dash_padding > 0
+            for r = 11 to 11 + dash_padding - 1
+                for c = 0 to 1
+                    table.cell(tbl_compact, c, r, "", text_size=size.small)
+
     if dash_mode == "Simplifie"
-        var table tbl_s = table.new(position.bottom_right, 2, 7 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        // ─── MODE SIMPLIFIE : 2 colonnes x 4 lignes (+ padding) ─────────────
+        // Titre / Etat 15h30 / P(expl) / Etat ajuste (apres 15h40)
+        // Les variables class_15h30_txt, class_15h30_col, pexpl_15h30,
+        // adj_txt, adj_col sont definies dans le scope commun en amont.
+        var table tbl_s = table.new(position.bottom_right, 2, 4 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-        table.cell(tbl_s, 0, 0, "Amp. NY AM",        bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 0, "",                  bgcolor=DASH_BG, text_size=size.small)
+        // Ligne 0 : titre, split sur 2 colonnes pour gagner en largeur
+        table.cell(tbl_s, 0, 0, "NY AM",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 0, "risk expl", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small)
 
-        table.cell(tbl_s, 0, 1, f_fmt_amp(amp),      bgcolor=DASH_BG, text_color=COL_BLUE,    text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 1, "",                  bgcolor=DASH_BG, text_size=size.small)
+        // Ligne 1 : Etat 15h30
+        table.cell(tbl_s, 0, 1, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 1, class_15h30_txt,   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
 
-        table.cell(tbl_s, 0, 2, "Journée",           bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 2, "",                  bgcolor=DASH_BG, text_size=size.small)
+        // Ligne 2 : P(expl)
+        table.cell(tbl_s, 0, 2, "P(expl)",                 bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_15h30),   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
 
-        table.cell(tbl_s, 0, 3, f_label_text(w_lbl), bgcolor=DASH_BG, text_color=w_lbl_color, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 3, "",                  bgcolor=DASH_BG, text_size=size.small)
+        // Ligne 3 : Etat ajuste (a partir de 15h40, sans suffixe horaire)
+        table.cell(tbl_s, 0, 3, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_s, 1, 3, adj_txt,           bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
 
-        table.cell(tbl_s, 0, 4, "Retracement",       bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 4, "",                  bgcolor=DASH_BG, text_size=size.small)
-
-        table.cell(tbl_s, 0, 5, ">=20%",             bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 5, pm_active ? f_fmt_pct(pm_retr20) : "—", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr20), text_size=size.small)
-
-        table.cell(tbl_s, 0, 6, ">=40%",             bgcolor=DASH_BG, text_color=color.gray,  text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 6, pm_active ? f_fmt_pct(pm_retr40) : "—", bgcolor=DASH_BG, text_color=f_color_retr(pm_retr40), text_size=size.small)
-
-        // Padding transparent
         if dash_padding > 0
-            for r = 7 to 7 + dash_padding - 1
+            for r = 4 to 4 + dash_padding - 1
                 for c = 0 to 1
                     table.cell(tbl_s, c, r, "", text_size=size.small)
 
-// ── Detection FVG ────────────────────────────────────────────────────────────
+// ── Detection FVG (greffon inchange depuis v1.2) ─────────────────────────────
 // Pattern Fair Value Gap, evalue sur trois bougies cloturees consecutives :
 //   bar[3] = bougie precedente, bar[2] = bougie FVG, bar[1] = bougie suivante.
 //   - Bullish FVG : low[1]  > high[3], la bougie [2] est dans le trou haussier
