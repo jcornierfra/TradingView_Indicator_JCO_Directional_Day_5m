@@ -47,12 +47,21 @@ Chaque condition activée vaut +1 point, sauf « lundi » qui retire 1 point. Sc
 | 🟩 **Orange-faible** | score ≤ 0 | 8.1% | 22% | Contrarian taille standard |
 | 🟨 **Orange-moyen** | score 1–2 | 12.0% | 37% | Contrarian, gestion stricte |
 | 🟧 **Orange-élevé** | score ≥ 3 | 19.4% | 9% | Taille réduite, stops serrés |
-| 🟥 **ROUGE 15h45** | Orange ET `b12_range ≥ 120` (à 15h40) | **72.7%** | 3% | Sortir ou réduire, alerte tardive |
+| 🟥 **ROUGE 15h45** | Orange ET `b12_range ≥ 120` ET alignement B1+B2 (V1) | **80.0%** | ~3% | Sortir ou réduire, alerte tardive |
 | 🔴 **ROUGE 15h30** | `pre_amp ≥ 280` ET `on_amp/h ≥ 30` ET `position_14d ≤ 32` | **91.7%** | 4% | Pas de contrarian, attendre |
 
-**Recall combiné rouges 15h30+15h45** : 41.3% des explosions captées sur 7% du temps avec 82.6% de précision.
+**Recall combiné rouges 15h30+15h45** : ~40% des explosions captées sur ~7% du temps avec 86% de précision (V1).
 
 **Filtre VERT** : 0 explosion sur 87 jours testés (parfait en train ET test).
+
+### Alerte tardive V1 — condition d'alignement directionnel
+
+L'alerte ROUGE 15h45 requiert que **les corps de B1 (15h30–15h35) et B2 (15h35–15h40) aillent dans le même sens**, en plus du critère `b12_range ≥ 120`. Cela filtre les faux positifs *yo-yo* type « spike + retour » où B1 et B2 s'opposent (range élevé mais marché qui range sans direction nette).
+
+Sur les 11 alertes V0 (range seul) : 8 vraies explosions, 3 faux positifs dont 1 yo-yo filtré par V1.
+**Précision : 72.7% (V0) → 80.0% (V1)** sans perte de vraies explosions.
+
+Le réglage `require_b12_alignment` permet de revenir à V0 si besoin (par exemple si le régime de marché change).
 
 ---
 
@@ -116,8 +125,12 @@ weekday     │ Vendredi    │ +1
 expl_5d     │ 5           │ ✓ (>= 2)
 pos_14d     │ −1.3%       │ ✓ (<= 32%)
 ─────────────────────────────────
+b12 range   │ 158 pts     │ ✓ (>= 120)
+b12 align   │ B1↑ B2↑     │ ✓
 Etat ajuste │ ROUGE
 ```
+
+Les deux lignes `b12 range` / `b12 align` rendent visible le pourquoi de l'alerte tardive : range cumulé B1+B2 et alignement directionnel. Avant 15h40 elles affichent `—`.
 
 ### Mode `Complet` — 2 colonnes (compact, seuils masqués)
 
@@ -127,6 +140,8 @@ Identique au précédent mais sans la 3e colonne. La couleur de chaque valeur de
 - **Rouge** : weekday Jeu/Ven (lever +1, augmente le risque) — sémantique inverse
 - **Vert** : weekday Lundi (lever −1, réduit le risque)
 - **Gris** : levier non activé ou neutre
+- Pour `b12 range` : vert si ≥ seuil
+- Pour `b12 align` : vert si aligné, rouge si yo-yo
 
 ### Couleur de fond
 
@@ -185,6 +200,7 @@ Toutes les autres bornes temporelles (pré-NY 14h00, B2 close 15h40, fin AM 17h3
 - **Seuil on_amp/h min pour ROUGE 15h30** : 30 pts/heure
 - **Seuil position_14d max pour ROUGE 15h30** : 32%
 - **Seuil b12_range pour ROUGE 15h45** : 120 pts
+- **Alerte 15h45 : exiger l'alignement B1+B2** : on/off (défaut on, recommandé). V1 du filtre — décocher pour revenir au comportement V0 (range seul).
 
 ### Paramètres techniques
 
@@ -230,6 +246,15 @@ Toutes les autres bornes temporelles (pré-NY 14h00, B2 close 15h40, fin AM 17h3
 ---
 
 ## Changelog
+
+### v2.0.1 - 2026-05-11
+
+- **Fix** : `classification_15h30` n'était reset qu'à 15h30 et pas à 14h00. Conséquence : pendant la pré-NY le dashboard affichait le verdict de la veille avec un fond gris (incohérent). Reset ajouté au trigger pré-NY start.
+- **Alerte tardive 15h45 V1** : ajout d'une condition d'alignement directionnel sur B1 et B2. L'alerte ne se déclenche que si les corps de B1 et B2 vont dans le même sens, en plus du critère `b12_range ≥ 120`. Filtre les faux positifs *yo-yo* (spike + retour).
+  - Sur les 11 alertes V0 (2025–2026) : 8 vraies explosions, 3 faux positifs dont 1 yo-yo filtré par V1.
+  - Précision : 72.7% (V0) → **80.0% (V1)** sans perte de vrai positif.
+  - Nouvel input `Alerte 15h45 : exiger l'alignement B1+B2` (défaut on) pour pouvoir revenir au comportement V0.
+- **Dashboard Complet** : 2 nouvelles lignes `b12 range` et `b12 align` (avant `Etat ajusté`) pour visualiser le détail de la condition d'alerte. Table passe de 11 à 13 lignes.
 
 ### v2.0.0 - 2026-05-11
 

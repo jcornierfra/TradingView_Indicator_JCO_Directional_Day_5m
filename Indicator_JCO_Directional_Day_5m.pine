@@ -1,7 +1,7 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 2.0.0
+// Version: 2.0.1
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
 // Description: Indicateur Risk Assessment NY AM bâti sur l'étude statistique
@@ -29,8 +29,9 @@
 //                3  Orange-faible   score <= 0                         P=8.1%
 //                4  Orange-moyen    score 1-2                          P=12.0%
 //                5  Orange-eleve    score >= 3                         P=19.4%
-//                6  ROUGE 15h45     orange ET b12_range >= 120         P=72.7%
-//                                   (alerte tardive a 15h40)
+//                6  ROUGE 15h45     orange ET b12_range >= 120 ET     P=72.7%
+//                                   alignement B1+B2 (V1) — alerte
+//                                   tardive declenchee au close B2
 //
 //              Les 4 phases temporelles :
 //                Phase 1 (avant 14h00) : score "structurel", 3 leviers stables
@@ -40,6 +41,7 @@
 //                                         (Etat = verdict 15h30)
 //                Phase 4 (15h40)        : alerte tardive eventuelle, orange ->
 //                                         ROUGE 15h45 si b12_range >= 120
+//                                         ET corps B1 et B2 dans le meme sens
 //                                         (Etat ajuste = classification courante)
 //
 //              Greffon FVG inchange depuis v1.2 : repeint en jaune les bougies
@@ -47,10 +49,11 @@
 //
 //              Dashboard en bas a droite, trois modes :
 //                - Masque    : pas d'affichage
-//                - Complet   : 11 lignes (Etat / Score / P(expl) / 5 leviers /
-//                              Etat ajuste). En 3 colonnes avec seuils par
-//                              defaut, ou 2 colonnes compactes avec couleur
-//                              des leviers indiquant leur validation.
+//                - Complet   : 13 lignes (Etat / Score / P(expl) / 5 leviers /
+//                              b12 range / b12 align / Etat ajuste). En 3
+//                              colonnes avec seuils par defaut, ou 2 colonnes
+//                              compactes avec couleur des leviers indiquant
+//                              leur validation.
 //                - Simplifie : 4 lignes (titre / Etat / P(expl) / Etat ajuste)
 //              Padding configurable pour empiler avec un dashboard secondaire.
 //
@@ -71,6 +74,23 @@
 //   le critere c2 est rempli. Si oui, le jour est marque "explose".
 //
 // Changelog:
+//   v2.0.1 - 2026-05-11
+//     - Fix : classification_15h30 etait reset uniquement a 15h30 et pas a
+//       14h00, donc pendant la pre-NY le dashboard affichait le verdict de
+//       la veille avec un fond gris (incoherent). Reset ajoute au trigger
+//       pre-NY start.
+//     - Alerte tardive 15h45 V1 : ajout d'une condition d'alignement
+//       directionnel sur B1 et B2. L'alerte ne se declenche que si les
+//       corps de B1 et B2 vont dans le meme sens, en plus du critere
+//       b12_range >= 120. Filtre les faux positifs yo-yo (spike + retour).
+//       Sur les 11 alertes V0, 1 faux positif filtre, 0 vrai positif perdu.
+//       Precision : 72.7% (V0) -> 80.0% (V1).
+//       Nouvel input "Alerte 15h45 : exiger l'alignement B1+B2"
+//       (defaut on) pour pouvoir desactiver si regime de marche change.
+//     - Dashboard Complet : 2 nouvelles lignes b12 range et b12 align
+//       (avant Etat ajuste) pour visualiser le detail de la condition
+//       d'alerte. Table passe de 11 a 13 lignes.
+//
 //   v2.0.0 - 2026-05-11
 //     - REFONTE MAJEURE : remplacement integral du module statistique v1.x
 //       (tables Timing 1/2/3, Section 3, ponderation log-odds) par le module
@@ -131,6 +151,7 @@ threshold_rouge_pre_amp   = input.int(280,    "Seuil pre_amp min pour filtre ROU
 threshold_rouge_on_amp_h  = input.float(30.0, "Seuil on_amp/h min pour ROUGE 15h30 (pts/heure)", minval=0,  group=grp_filters)
 threshold_rouge_pos_14d   = input.int(32,     "Seuil position_14d max pour ROUGE 15h30 (%)",    minval=0, maxval=100, group=grp_filters)
 threshold_rouge_15h45     = input.int(120,    "Seuil b12_range pour ROUGE 15h45 (pts)",         minval=0,  group=grp_filters, tooltip="Alerte tardive : si classification 15h30 etait Orange et b12_range (range des 2 premieres bougies AM) >= ce seuil, bascule en ROUGE 15h45.")
+require_b12_alignment     = input.bool(true,  "Alerte 15h45 : exiger l'alignement B1+B2",       group=grp_filters, tooltip="V1 - Si vrai (recommande), l'alerte ne se declenche que si les corps de B1 et B2 vont dans le meme sens. Filtre les faux positifs yo-yo. Si faux, comportement V0 (range seul). Precision 80% vs 72.7% en V0 sur 2025-2026.")
 
 // ── Parametres techniques ────────────────────────────────────────────────────
 grp_tech = "Techniques"
@@ -267,6 +288,10 @@ f_check_mark(b) =>
 f_fmt_signed(x) =>
     x > 0 ? "+" + str.tostring(x) : str.tostring(x)
 
+// Fleche de direction d'un corps de bougie : haussiere / baissiere / doji
+f_dir_arrow(d) =>
+    d > 0 ? "↑" : d < 0 ? "↓" : "·"
+
 // ── Detection d'explosion c2 (cf. PDF, definition stricte) ───────────────────
 // Cherche une paire (i, j) de bougies M5 avec j >= i+2 telle que
 // |close[j] - open[i]| >= threshold et au plus max_contr bougies contraires
@@ -363,6 +388,9 @@ var int   expl_count_5d     = 0
 
 // Snapshot 15h40 (B2 fermee) -> alerte tardive eventuelle
 var float b12_range = na
+var int   b1_dir = 0       // direction du corps B1 : +1 haussier, -1 baissier, 0 doji
+var int   b2_dir = 0       // direction du corps B2
+var bool  b12_aligned = false  // true si B1 et B2 vont dans le meme sens, hors doji
 var int   b2_close_day = -1
 
 // Detection c2 a 17h30 -> push dans l'historique des 5 derniers jours
@@ -387,8 +415,12 @@ if fire_pre_ny_start
     pre_l := low
     pre_o := open
     pre_c := close
-    // Reset de la classification : on entre en phase "EN COURS"
+    // Reset des classifications : on entre en phase "EN COURS"
+    // classification et classification_15h30 doivent etre remises a zero
+    // sinon le dashboard affiche encore le verdict de la veille pendant
+    // la pre-NY (texte de l'ancienne classe avec un BG gris -> incoherent).
     classification := 0
+    classification_15h30 := 0
     score_locked := false
 
 // Accumulation pre-NY pendant 14h00-15h25 (inclus)
@@ -497,8 +529,19 @@ if fire_b2_close
     b2_l = low[1]
     b12_range := math.max(b1_h, b2_h) - math.min(b1_l, b2_l)
 
-    // Bascule ROUGE 15h45 si classification etait Orange (3/4/5) et b12_range >= seuil
-    if (classification == 3 or classification == 4 or classification == 5) and b12_range >= threshold_rouge_15h45
+    // V1 : direction du corps de chaque bougie + alignement
+    // Filtre les faux positifs yo-yo type "spike + retour" (B1 et B2 en opposition).
+    body_b1 = close[2] - open[2]
+    body_b2 = close[1] - open[1]
+    b1_dir := body_b1 > 0 ? 1 : body_b1 < 0 ? -1 : 0
+    b2_dir := body_b2 > 0 ? 1 : body_b2 < 0 ? -1 : 0
+    b12_aligned := b1_dir == b2_dir and b1_dir != 0
+
+    // Bascule ROUGE 15h45 si classification etait Orange (3/4/5),
+    // b12_range >= seuil, et alignement OK (si require_b12_alignment).
+    range_ok = b12_range >= threshold_rouge_15h45
+    align_ok = not require_b12_alignment or b12_aligned
+    if (classification == 3 or classification == 4 or classification == 5) and range_ok and align_ok
         classification := 6   // ROUGE 15h45
 
 // ── Trigger 5 : NY end (17h30) — detection c2 + push historique ─────────────
@@ -578,9 +621,16 @@ if dash_mode != "Masque" and barstate.islast
     lev_expl_5d = expl_count_5d >= threshold_expl_5d
     lev_pos_14d = not na(position_14d_pts) and position_14d_pts <= threshold_position_14d
 
+    // Etat detaille de l'alerte tardive (visible a partir de 15h40)
+    b12_avail        = day_id == b2_close_day
+    b12_range_ok     = b12_avail and b12_range >= threshold_rouge_15h45
+    b12_range_text   = b12_avail ? f_fmt_pts(b12_range) : "—"
+    b12_dir_text     = b12_avail ? ("B1" + f_dir_arrow(b1_dir) + " B2" + f_dir_arrow(b2_dir)) : "—"
+    b12_align_active = b12_avail and b12_aligned
+
     if dash_mode == "Complet" and dash_show_thresholds
         // ─── MODE COMPLET 3 COLONNES : Label | Valeur | Indicateur seuil ────
-        var table tbl_full = table.new(position.bottom_right, 3, 11 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        var table tbl_full = table.new(position.bottom_right, 3, 13 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
         // Ligne 0 : Etat (verdict 15h30, fige)
         table.cell(tbl_full, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
@@ -632,14 +682,24 @@ if dash_mode != "Masque" and barstate.islast
         table.cell(tbl_full, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
         table.cell(tbl_full, 2, 9, "", bgcolor=panel_bg, text_size=size.tiny)
 
-        // Ligne 10 : Etat ajuste (vert/rouge/orange-X apres 15h40, sinon tiret)
-        table.cell(tbl_full, 0, 10, "Etat ajuste",    bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 10, adj_txt,          bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
-        table.cell(tbl_full, 2, 10, "",               bgcolor=panel_bg, text_size=size.small)
+        // Ligne 10 : b12 range (range cumule des 2 premieres bougies AM)
+        table.cell(tbl_full, 0, 10, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 10, b12_range_text,   bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 10, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h45) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+        // Ligne 11 : b12 align (direction des corps B1 et B2)
+        table.cell(tbl_full, 0, 11, "b12 align",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 11, b12_dir_text,     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+        table.cell(tbl_full, 2, 11, b12_avail ? f_check_mark(b12_align_active) : "", bgcolor=panel_bg, text_color=b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY), text_size=size.small)
+
+        // Ligne 12 : Etat ajuste (vert/rouge/orange-X apres 15h40, sinon tiret)
+        table.cell(tbl_full, 0, 12, "Etat ajuste",    bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_full, 1, 12, adj_txt,          bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+        table.cell(tbl_full, 2, 12, "",               bgcolor=panel_bg, text_size=size.small)
 
         // Lignes de padding transparent
         if dash_padding > 0
-            for r = 11 to 11 + dash_padding - 1
+            for r = 13 to 13 + dash_padding - 1
                 for c = 0 to 2
                     table.cell(tbl_full, c, r, "", text_size=size.small)
 
@@ -650,7 +710,7 @@ if dash_mode != "Masque" and barstate.islast
         //   - rouge : weekday jeudi/vendredi (lever +1, donc augmente le risque)
         //   - vert  : weekday lundi (lever -1, donc reduit le risque)
         //   - gris  : levier non active / neutre
-        var table tbl_compact = table.new(position.bottom_right, 2, 11 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        var table tbl_compact = table.new(position.bottom_right, 2, 13 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
         // Couleurs des leviers (col 1)
         col_pre_amp = lev_pre_amp ? COL_GREEN : COL_GRAY
@@ -699,13 +759,25 @@ if dash_mode != "Masque" and barstate.islast
         table.cell(tbl_compact, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
         table.cell(tbl_compact, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
 
-        // Ligne 10 : Etat ajuste
-        table.cell(tbl_compact, 0, 10, "Etat ajuste", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 10, adj_txt,       bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+        // Couleurs des cellules b12 (mode compact)
+        col_b12_range = b12_range_ok ? COL_GREEN : (b12_avail ? COL_GRAY : COL_GRAY)
+        col_b12_align = b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY)
+
+        // Ligne 10 : b12 range
+        table.cell(tbl_compact, 0, 10, "b12 range",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 10, b12_range_text,  bgcolor=panel_bg, text_color=col_b12_range, text_size=size.small)
+
+        // Ligne 11 : b12 align (direction des corps B1 et B2)
+        table.cell(tbl_compact, 0, 11, "b12 align",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 11, b12_dir_text,    bgcolor=panel_bg, text_color=col_b12_align, text_size=size.small)
+
+        // Ligne 12 : Etat ajuste
+        table.cell(tbl_compact, 0, 12, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+        table.cell(tbl_compact, 1, 12, adj_txt,         bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
 
         // Lignes de padding transparent
         if dash_padding > 0
-            for r = 11 to 11 + dash_padding - 1
+            for r = 13 to 13 + dash_padding - 1
                 for c = 0 to 1
                     table.cell(tbl_compact, c, r, "", text_size=size.small)
 
