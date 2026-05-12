@@ -4,7 +4,7 @@
 
 Indicateur TradingView Pine Script v6 d'**anticipation du risque d'explosion** sur la session NY AM du NQ Futures (Nasdaq 100), pour le scalp contrarien.
 
-À partir des informations disponibles **avant l'ouverture NY**, il classe la journée selon son risque d'explosion ≥ 200 pts en **6 niveaux**, via un score composite à 5 leviers et 2 filtres extrêmes. Une alerte tardive à 15h40 permet de capter les explosions qui se révèlent dès les premières bougies AM.
+À partir des informations disponibles **avant l'ouverture NY**, il classe la journée selon son risque d'explosion ≥ 200 pts en **6 niveaux**, via un score composite à 5 leviers et 2 filtres extrêmes. Le verdict est posé à **15h20** (10 min avant l'ouverture NY), laissant le temps de préparer le placement d'ordres. Une alerte tardive au close de la 2ᵉ bougie AM (**15h40**) permet de capter les explosions qui se révèlent dès les premières bougies.
 
 Inclut un greffon **FVG (Fair Value Gap)** qui repeint en jaune les bougies au centre d'un gap, avec filtre configurable sur la taille minimum.
 
@@ -20,7 +20,7 @@ Une **explosion ≥ 200 c2** est définie strictement (cf. PDF source) :
 
 L'étude statistique sous-jacente couvre 340 jours (jan. 2025 – mai 2026) avec **46 explosions** observées, soit un baseline de **13.5%** par jour. L'objectif du système est de concentrer ce risque sur quelques zones identifiables, plutôt que de le subir uniformément.
 
-À 15h30 le verdict est posé (5 niveaux). À 15h40, une alerte tardive peut faire basculer un verdict Orange en ROUGE 15h45 — ce qui capte les explosions où les 2 premières bougies M5 sont anormalement larges.
+À 15h20 le verdict est posé (5 niveaux). À 15h40, une alerte tardive peut faire basculer un verdict Orange en ROUGE 15h40 — ce qui capte les explosions où les 2 premières bougies M5 sont anormalement larges.
 
 ---
 
@@ -30,8 +30,8 @@ Chaque condition activée vaut +1 point, sauf « lundi » qui retire 1 point. Sc
 
 | # | Levier | Condition | Effet | Justification |
 |---|--------|-----------|-------|---------------|
-| 1a | `pre_amp_pts` | ≥ 240 | +1 | Range pré-NY 14h00–15h30. Une pré-NY agitée annonce souvent la suite. |
-| 1b | `pre_net_pts` | ≤ −110 | +1 | Net pré-NY baissier (effondrement annoncé, asymétrie observée). |
+| 1a | `pre_amp_pts` | ≥ 240 | +1 | Range pré-NY 14h00–15h20. Une pré-NY agitée annonce souvent la suite. |
+| 1b | `pre_net_pts` | ≤ −110 | +1 | Net pré-NY baissier 14h00–15h20 (effondrement annoncé, asymétrie observée). |
 | 3+ | `weekday` | jeudi ou vendredi | +1 | Fins de semaine : ajustements institutionnels, news macro. |
 | 3− | `weekday` | lundi | −1 | Lundi statistiquement très calme (4.3% P(expl)). |
 | 4 | `expl_count_5d` | ≥ 2 sur 5 jours | +1 | Régime explosif récent — les explosions arrivent en cluster. |
@@ -43,23 +43,22 @@ Chaque condition activée vaut +1 point, sauf « lundi » qui retire 1 point. Sc
 
 | Niveau | Règle | P(explosion) | Fréquence | Action |
 |--------|-------|--------------|-----------|--------|
-| 🟢 **VERT 15h30** | `pre_amp ≤ 130` ET `expl_count_5d = 0` | **0.0%** | 26% du temps | Scalp contrarian sans crainte |
-| 🟩 **Orange-faible** | score ≤ 0 | 8.1% | 22% | Contrarian taille standard |
-| 🟨 **Orange-moyen** | score 1–2 | 12.0% | 37% | Contrarian, gestion stricte |
-| 🟧 **Orange-élevé** | score ≥ 3 | 19.4% | 9% | Taille réduite, stops serrés |
-| 🟥 **ROUGE 15h45** | Orange ET `b12_range ≥ 120` ET alignement B1+B2 (V1) | **80.0%** | ~3% | Sortir ou réduire, alerte tardive |
-| 🔴 **ROUGE 15h30** | `pre_amp ≥ 280` ET `on_amp/h ≥ 30` ET `position_14d ≤ 32` | **91.7%** | 4% | Pas de contrarian, attendre |
+| 🟢 **VERT 15h20** | `pre_amp ≤ 130` ET `expl_count_5d = 0` | **0.0%** | 27% du temps | Scalp contrarian sans crainte |
+| 🟩 **Orange-faible** | score ≤ 0 | 7.6% | 23% | Contrarian taille standard |
+| 🟨 **Orange-moyen** | score 1–2 | 13.9% | 36% | Contrarian, gestion stricte |
+| 🟧 **Orange-élevé** | score ≥ 3 | 19.2% | 8% | Taille réduite, stops serrés |
+| 🟥 **ROUGE 15h40** | Orange ET `b12_range ≥ 120` ET alignement B1+B2 (V1) | **88.9%** | ~3% | Sortir ou réduire, alerte tardive |
+| 🔴 **ROUGE 15h20** | `pre_amp ≥ 280` ET `on_amp/h ≥ 30` ET `position_14d ≤ 32` | **90.9%** | 3% | Pas de contrarian, attendre |
 
-**Recall combiné rouges 15h30+15h45** : ~40% des explosions captées sur ~7% du temps avec 86% de précision (V1).
+**Précision combinée rouges 15h20+15h40** : **90.0%** (vs 86.4% en évaluation à 15h30).
 
-**Filtre VERT** : 0 explosion sur 87 jours testés (parfait en train ET test).
+**Filtre VERT** : 0 explosion sur 93 jours testés (parfait en train ET test).
 
 ### Alerte tardive V1 — condition d'alignement directionnel
 
-L'alerte ROUGE 15h45 requiert que **les corps de B1 (15h30–15h35) et B2 (15h35–15h40) aillent dans le même sens**, en plus du critère `b12_range ≥ 120`. Cela filtre les faux positifs *yo-yo* type « spike + retour » où B1 et B2 s'opposent (range élevé mais marché qui range sans direction nette).
+L'alerte ROUGE 15h40 requiert que **les corps de B1 (15h30–15h35) et B2 (15h35–15h40) aillent dans le même sens**, en plus du critère `b12_range ≥ 120`. Cela filtre les faux positifs *yo-yo* type « spike + retour » où B1 et B2 s'opposent (range élevé mais marché qui range sans direction nette).
 
-Sur les 11 alertes V0 (range seul) : 8 vraies explosions, 3 faux positifs dont 1 yo-yo filtré par V1.
-**Précision : 72.7% (V0) → 80.0% (V1)** sans perte de vraies explosions.
+**Précision : 72.7% (V0, range seul) → 88.9% (V1, range + alignement)** sur 2025–2026, sans perte de vrais positifs.
 
 Le réglage `require_b12_alignment` permet de revenir à V0 si besoin (par exemple si le régime de marché change).
 
@@ -71,12 +70,14 @@ L'indicateur évolue selon l'heure Paris :
 
 | Phase | Plage | État du score | État de la classification |
 |-------|-------|---------------|---------------------------|
-| 1. Structurel | avant 14h00 | 3 leviers stables (weekday, expl_5d, position_14d) | non calculée |
-| 2. Provisoire | 14h00 → 15h30 | + pre_amp/pre_net partiels, recalculé à chaque bougie M5 | "EN COURS" |
-| 3. Verrouillé | 15h30 | score final, classification figée (VERT / ROUGE 15h30 / Orange-X) | "Etat" affiché |
-| 4. Ajusté | 15h40+ | inchangé | "Etat ajusté" affiché — bascule éventuelle en ROUGE 15h45 |
+| 1. Structurel | 1h00 → 14h00 | 3 leviers stables (weekday, expl_5d, position_14d) | non calculée — fond gris |
+| 2. Provisoire | 14h00 → 15h20 | + pre_amp/pre_net partiels, recalculé à chaque bougie M5 | "EN COURS" |
+| 3. Verrouillé | 15h20 | score final, classification figée (VERT / ROUGE 15h20 / Orange-X) | "Etat" affiché |
+| 4. Ajusté | 15h40+ | inchangé | "Etat ajusté" affiché — bascule éventuelle en ROUGE 15h40 |
 
-Le dashboard distingue **Etat** (verdict 15h30, ne change jamais après) et **Etat ajusté** (classification courante, peut basculer à 15h40).
+Le dashboard distingue **Etat** (verdict 15h20, ne change jamais après) et **Etat ajusté** (classification courante, peut basculer à 15h40).
+
+Reset journalier à **1h00 Paris** (heure fixe) : purge des verdicts de la veille avant que la phase structurelle ne reprenne le calcul du score.
 
 ---
 
@@ -108,7 +109,7 @@ Le plus compact, pour lecture rapide pendant le scalp :
 ```text
 NY AM        risk expl
 Etat        │ Orange-eleve
-P(expl)     │ 19.4%
+P(expl)     │ 19.2%
 Etat ajuste │ ROUGE (apres 15h40, sinon —)
 ```
 
@@ -117,7 +118,7 @@ Etat ajuste │ ROUGE (apres 15h40, sinon —)
 ```text
 Etat        │ Orange-eleve
 Score       │ +5
-P(expl)     │ 19.4%
+P(expl)     │ 19.2%
 ─────────────────────────────────
 pre_amp     │ 268 pts     │ ✓ (>= 240)
 pre_net     │ −198 pts    │ ✓ (<= −110)
@@ -145,16 +146,16 @@ Identique au précédent mais sans la 3e colonne. La couleur de chaque valeur de
 
 ### Couleur de fond
 
-Le fond du panneau reflète la **classification courante** (incluant ROUGE 15h45 si l'alerte se déclenche), pour une lecture visuelle immédiate de l'urgence.
+Le fond du panneau reflète la **classification courante** (incluant ROUGE 15h40 si l'alerte se déclenche), pour une lecture visuelle immédiate de l'urgence.
 
 | Classification | Couleur de fond |
 |----------------|-----------------|
-| VERT 15h30 | vert pâle |
+| VERT 15h20 | vert pâle |
 | Orange-faible | vert-jaune pâle |
 | Orange-moyen | jaune pâle |
 | Orange-élevé | orange pâle |
-| ROUGE 15h45 | rouge clair (coral) |
-| ROUGE 15h30 | rouge foncé |
+| ROUGE 15h40 | rouge clair (coral) |
+| ROUGE 15h20 | rouge foncé |
 
 ---
 
@@ -178,7 +179,7 @@ Toutes les valeurs en dur dans le code (seuils, bandes du score, mapping des cou
 - **Heure debut NY AM (Paris)** : 15 (défaut)
 - **Minute debut NY AM** : 30 (défaut)
 
-Toutes les autres bornes temporelles (pré-NY 14h00, B2 close 15h40, fin AM 17h30) sont dérivées de ce point, et le DST est géré automatiquement.
+Toutes les autres bornes temporelles (reset 1h00, pré-NY 14h00, évaluation 15h20, B2 close 15h40, fin AM 17h30) sont dérivées de ce point, et le DST est géré automatiquement.
 
 ### Dashboard
 
@@ -196,11 +197,11 @@ Toutes les autres bornes temporelles (pré-NY 14h00, B2 close 15h40, fin AM 17h3
 ### Filtres extrêmes
 
 - **Seuil pre_amp max pour filtre VERT** : 130 pts
-- **Seuil pre_amp min pour filtre ROUGE 15h30** : 280 pts
-- **Seuil on_amp/h min pour ROUGE 15h30** : 30 pts/heure
-- **Seuil position_14d max pour ROUGE 15h30** : 32%
-- **Seuil b12_range pour ROUGE 15h45** : 120 pts
-- **Alerte 15h45 : exiger l'alignement B1+B2** : on/off (défaut on, recommandé). V1 du filtre — décocher pour revenir au comportement V0 (range seul).
+- **Seuil pre_amp min pour filtre ROUGE 15h20** : 280 pts
+- **Seuil on_amp/h min pour ROUGE 15h20** : 30 pts/heure
+- **Seuil position_14d max pour ROUGE 15h20** : 32%
+- **Seuil b12_range pour ROUGE 15h40** : 120 pts
+- **Alerte 15h40 : exiger l'alignement B1+B2** : on/off (défaut on, recommandé). V1 du filtre — décocher pour revenir au comportement V0 (range seul).
 
 ### Paramètres techniques
 
@@ -237,7 +238,7 @@ Toutes les autres bornes temporelles (pré-NY 14h00, B2 close 15h40, fin AM 17h3
 
 ## Limites à connaître
 
-1. **Calibration sur 340 jours** : échantillon raisonnable mais limité. Le filtre ROUGE 15h30 perd un peu de précision sur le hold-out 2026 (75% vs 100% train).
+1. **Calibration sur 340 jours** : échantillon raisonnable mais limité. Le filtre ROUGE 15h20 perd un peu de précision sur le hold-out 2026 (75% vs 100% train).
 2. **~12% des explosions restent imprévisibles** : aucun levier ne signale parfois, et le système le sait. C'est la limite irréductible.
 3. **Marché qui change** : la calibration est faite sur le régime 2025–mi 2026. Si le marché redevient calme façon 2023–2024, les seuils ne seront plus pertinents et il faudra recalibrer.
 4. **Détection c2 stricte** : la fonction tourne en O(n³) mais sur n=24, ce qui prend quelques millisecondes par jour à 17h30. Pas d'impact en historique ni en temps réel.
@@ -246,6 +247,27 @@ Toutes les autres bornes temporelles (pré-NY 14h00, B2 close 15h40, fin AM 17h3
 ---
 
 ## Changelog
+
+### v2.1.0 - 2026-05-12
+
+**Évaluation décalée de 15h30 à 15h20** (10 min avant l'ouverture NY AM), suite à la calibration PDF v2.
+
+- `pre_amp` / `pre_net` accumulés sur **14h00–15h20** (16 bougies M5 au lieu de 18). Corrélation 0.98 avec les valeurs 15h30 — diagnostic identique en pratique.
+- `on_amp_per_hour` : durée overnight passe de 17.4167h à **17.25h** (22h05 J−1 → 15h20 J).
+- `position_14d` : basé sur l'open de la bougie 15h20–15h25.
+- Alerte tardive renommée **15h45 → 15h40** (instant inchangé : close de B2). L'attente jusqu'à 15h45 n'apportait aucune information supplémentaire.
+- Renommages classification : VERT/ROUGE 15h30 → VERT/ROUGE **15h20**, ROUGE 15h45 → ROUGE **15h40**.
+- Probabilités par classe recalibrées (PDF v2) : Orange-faible 8.1% → 7.6%, Orange-moyen 12.0% → 13.9%, Orange-élevé 19.4% → 19.2%, ROUGE 15h40 72.7% → **88.9%**, ROUGE 15h20 91.7% → 90.9%. VERT inchangé à 0.0%.
+- **Gains opérationnels** : +10 min de préparation avant ouverture, +6 jours VERT (93 vs 87, toujours 0% explosion), précision combinée ROUGE 90.0% vs 86.4%, alerte tardive 88.9% vs 80.0%.
+
+Le push des bougies AM (15h30 → 17h30) et la détection c2 restent inchangés.
+
+### v2.0.2 - 2026-05-11
+
+- **Phase 1 (Structurel) implémentée**. Avant cette version, le dashboard affichait le verdict de la veille jusqu'à 14h00 (fond coloré avec une classe héritée). Le nouveau trigger `fire_daily_reset` à **1h00 Paris** (heure fixe pour éviter les problèmes de TZ) purge tous les verdicts et données de la veille.
+- **Score structurel** entre 1h00 et 14h00 : recalcul continu avec les 3 leviers stables (`weekday`, `expl_count_5d`, `position_14d` estimée via close). Fond gris du panneau, leviers `pre_amp` / `pre_net` affichent `—`.
+- **Dashboard** : label `Structurel` pour l'Etat entre 1h00 et 14h00, puis `EN COURS` entre 14h00 et 15h20 (ex-15h30), puis classification finale.
+- **Fix** helper `f_paris_to_utc_min` : wrap modulo 1440 quand le résultat est négatif. Sans ce wrap, 01h00 Paris en CEST (été) donnait `60 − 120 = −60`, valeur jamais atteinte par `utc_total` ∈ [0, 1439], et le trigger `fire_daily_reset` ne s'activait jamais en été.
 
 ### v2.0.1 - 2026-05-11
 

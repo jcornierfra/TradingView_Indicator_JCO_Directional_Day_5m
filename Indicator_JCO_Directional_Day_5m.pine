@@ -1,48 +1,54 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 2.0.1
+// Version: 2.1.0
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
 // Description: Indicateur Risk Assessment NY AM bâti sur l'étude statistique
-//              "Anticiper les explosions sur la session NY AM" (Mai 2026,
-//              340 jours analysés, 46 explosions >= 200 pts c2).
+//              "Anticiper les explosions sur la session NY AM" (PDF v2, Mai
+//              2026, 340 jours analyses, 46 explosions >= 200 pts c2).
 //
-//              Objectif : à 15h30 Paris (= ouverture NY AM), classer la journée
-//              selon son risque d'explosion en 6 niveaux, sur la base d'un
-//              score composite a 5 leviers + 2 filtres extremes + 1 alerte
-//              tardive a 15h40.
+//              Objectif : a 15h20 Paris (10 min avant l'ouverture NY AM),
+//              classer la journee selon son risque d'explosion en 6 niveaux,
+//              sur la base d'un score composite a 5 leviers + 2 filtres
+//              extremes + 1 alerte tardive a 15h40.
 //
-//              Les 5 leviers du score composite :
-//                1a  pre_amp_pts     >= 240   +1   range pre-NY 14h00-15h30
-//                1b  pre_net_pts     <= -110  +1   net pre-NY 14h00-15h30
+//              Les 5 leviers du score composite (evalues a 15h20) :
+//                1a  pre_amp_pts     >= 240   +1   range pre-NY 14h00-15h20
+//                1b  pre_net_pts     <= -110  +1   net pre-NY 14h00-15h20
 //                3+  jeudi/vendredi          +1   levier calendaire
 //                3-  lundi                    -1   le seul levier negatif
 //                4   expl_count_5d   >= 2    +1   regime explosif recent
 //                5   position_14d    <= 32%  +1   proche du plus bas 14j
 //              Score total : -1 a +5.
 //
-//              Les 6 niveaux de risque :
-//                1  VERT 15h30      pre_amp<=130 ET expl_count_5d=0   P=0.0%
-//                2  ROUGE 15h30     pre_amp>=280 ET on_amp/h>=30      P=91.7%
+//              Les 6 niveaux de risque (probabilites PDF v2) :
+//                1  VERT 15h20      pre_amp<=130 ET expl_count_5d=0   P=0.0%
+//                2  ROUGE 15h20     pre_amp>=280 ET on_amp/h>=30      P=90.9%
 //                                   ET position_14d<=32
-//                3  Orange-faible   score <= 0                         P=8.1%
-//                4  Orange-moyen    score 1-2                          P=12.0%
-//                5  Orange-eleve    score >= 3                         P=19.4%
-//                6  ROUGE 15h45     orange ET b12_range >= 120 ET     P=72.7%
+//                3  Orange-faible   score <= 0                         P=7.6%
+//                4  Orange-moyen    score 1-2                          P=13.9%
+//                5  Orange-eleve    score >= 3                         P=19.2%
+//                6  ROUGE 15h40     orange ET b12_range >= 120 ET     P=88.9%
 //                                   alignement B1+B2 (V1) — alerte
 //                                   tardive declenchee au close B2
 //
 //              Les 4 phases temporelles :
-//                Phase 1 (avant 14h00) : score "structurel", 3 leviers stables
-//                Phase 2 (14h00-15h30) : score provisoire, pre_amp/pre_net
+//                Phase 1 (1h00-14h00)   : score "structurel", 3 leviers stables
+//                                         (weekday, expl_count_5d, position_14d)
+//                                         — fond gris, pre_amp/pre_net en "—"
+//                Phase 2 (14h00-15h20) : score provisoire, pre_amp/pre_net
 //                                        evoluent au fil des bougies M5
-//                Phase 3 (15h30)        : verrouillage, classification figee
-//                                         (Etat = verdict 15h30)
+//                Phase 3 (15h20)        : verrouillage, classification figee
+//                                         (Etat = verdict 15h20)
 //                Phase 4 (15h40)        : alerte tardive eventuelle, orange ->
-//                                         ROUGE 15h45 si b12_range >= 120
+//                                         ROUGE 15h40 si b12_range >= 120
 //                                         ET corps B1 et B2 dans le meme sens
 //                                         (Etat ajuste = classification courante)
+//
+//              Reset journalier a 1h00 Paris (heure fixe, pas de pb de TZ) :
+//              purge des verdicts de la veille avant que la phase structurelle
+//              ne reprenne le calcul du score.
 //
 //              Greffon FVG inchange depuis v1.2 : repeint en jaune les bougies
 //              au centre d'un "Fair Value Gap" (low[1]>high[3] ou high[1]<low[3]).
@@ -74,6 +80,52 @@
 //   le critere c2 est rempli. Si oui, le jour est marque "explose".
 //
 // Changelog:
+//   v2.1.0 - 2026-05-12
+//     - Evaluation deplacee de 15h30 a 15h20 (10 min avant ouverture NY AM).
+//       Justification PDF v2 Section 4 : correlation pre_amp/pre_net a 0.98
+//       entre 15h20 et 15h30, mais +10 min de preparation operationnelle,
+//       +6 jours VERT (93 vs 87, toujours 0% explosion), precision combinee
+//       ROUGE 90.0% vs 86.4%, alerte tardive 88.9% vs 80.0%.
+//     - pre_amp/pre_net accumules sur 14h00-15h20 (16 bougies M5 au lieu de 18).
+//     - on_amp_per_hour : duree de reference passee de 17.4167h a 17.25h
+//       (overnight 22h05 J-1 -> 15h20 J = 17h15 min).
+//     - position_14d : base sur l'open de la bougie 15h20-15h25 (au lieu de 15h30).
+//     - Alerte tardive renommee 15h45 -> 15h40 (close de B2, instant inchange).
+//     - Renommages classification : VERT/ROUGE 15h30 -> VERT/ROUGE 15h20,
+//       ROUGE 15h45 -> ROUGE 15h40 ; var classification_15h30 -> _15h20,
+//       constantes couleurs COL_CLASS_ROUGE_15h30/_15h45 -> _15h20/_15h40.
+//     - Probabilites par classe mises a jour selon PDF v2 :
+//       VERT 0.0% inchange, Orange-faible 8.1% -> 7.6%, Orange-moyen 12.0% ->
+//       13.9%, Orange-eleve 19.4% -> 19.2%, ROUGE 15h40 72.7% -> 88.9%,
+//       ROUGE 15h20 91.7% -> 90.9%.
+//     - Push des bougies AM toujours a partir de 15h30 (ouverture NY reelle)
+//       jusqu'a 17h30 -> detection c2 inchangee.
+//
+//   v2.0.2 - 2026-05-11
+//     - Phase 1 (Structurel) reellement implementee. Avant cette version,
+//       le dashboard affichait le verdict de la veille jusqu'a 14h00 ce qui
+//       portait a confusion (fond colore avec une classe heritee).
+//     - Nouveau trigger fire_daily_reset a 1h00 Paris (heure fixe pour
+//       eviter les problemes de TZ liees aux sessions TV). A 1h00, tout
+//       l'etat lie a la veille est purge : classification, classification_15h20,
+//       pre_amp_pts, pre_net_pts, on_amp_*, b12_*, position_14d_pts,
+//       expl_count_5d. Les structures persistantes (recent_expl_days,
+//       am_*, on_active) ne sont pas touchees.
+//     - Nouveau bloc score structurel actif entre 1h00 et 14h00 : recalcul
+//       continu du score avec les 3 leviers stables (weekday, expl_count_5d,
+//       position_14d estimee via close). Score range -1 a +3. La
+//       classification reste 0 (fond gris) tant que le verdict 15h30 n'est
+//       pas pose.
+//     - Dashboard : label "Structurel" pour l'Etat entre 1h00 et 14h00,
+//       puis "EN COURS" entre 14h00 et 15h30, puis classification finale.
+//       Les leviers pre_amp et pre_net affichent "—" pendant la phase
+//       structurelle.
+//     - Fix helper f_paris_to_utc_min : wrap modulo 1440 quand le resultat
+//       est negatif. Sans ce wrap, 01h00 Paris en CEST (ete) donnait
+//       60 - 120 = -60, valeur jamais atteinte par utc_total in [0,1439],
+//       et le trigger fire_daily_reset ne firait jamais en ete. Avec le
+//       wrap, 01h00 Paris ete -> 23h00 UTC = 1380, atteignable.
+//
 //   v2.0.1 - 2026-05-11
 //     - Fix : classification_15h30 etait reset uniquement a 15h30 et pas a
 //       14h00, donc pendant la pre-NY le dashboard affichait le verdict de
@@ -139,19 +191,19 @@ fvg_min_pts = input.int(1,              "Ecart minimum, en points",  minval=0, g
 
 // ── Score composite ──────────────────────────────────────────────────────────
 grp_score = "Score composite"
-threshold_pre_amp_score = input.int(240,  "Seuil pre_amp pour +1 au score (pts)",                minval=0,  group=grp_score, tooltip="Range pre-NY 14h00-15h30. Levier 1a active si >= ce seuil.")
-threshold_pre_net_score = input.int(-110, "Seuil pre_net pour +1 au score (pts, valeur negative)", maxval=0, group=grp_score, tooltip="Net pre-NY 14h00-15h30. Levier 1b active si <= ce seuil (baissier).")
+threshold_pre_amp_score = input.int(240,  "Seuil pre_amp pour +1 au score (pts)",                minval=0,  group=grp_score, tooltip="Range pre-NY 14h00-15h20. Levier 1a active si >= ce seuil.")
+threshold_pre_net_score = input.int(-110, "Seuil pre_net pour +1 au score (pts, valeur negative)", maxval=0, group=grp_score, tooltip="Net pre-NY 14h00-15h20. Levier 1b active si <= ce seuil (baissier).")
 threshold_expl_5d       = input.int(2,    "Nb explosions sur 5j pour +1 au score",               minval=0,  group=grp_score, tooltip="Levier 4 (regime explosif) active si expl_count_5d >= ce seuil.")
 threshold_position_14d  = input.int(32,   "Position dans range 14j (%) pour +1 au score",        minval=0, maxval=100, group=grp_score, tooltip="Levier 5 (proximite plus bas 14j) active si position <= ce seuil.")
 
 // ── Filtres extremes ─────────────────────────────────────────────────────────
 grp_filters = "Filtres extremes"
-threshold_vert_pre_amp    = input.int(130,    "Seuil pre_amp max pour filtre VERT (pts)",       minval=0,  group=grp_filters, tooltip="VERT 15h30 si pre_amp <= ce seuil ET expl_count_5d = 0.")
-threshold_rouge_pre_amp   = input.int(280,    "Seuil pre_amp min pour filtre ROUGE 15h30 (pts)", minval=0, group=grp_filters)
-threshold_rouge_on_amp_h  = input.float(30.0, "Seuil on_amp/h min pour ROUGE 15h30 (pts/heure)", minval=0,  group=grp_filters)
-threshold_rouge_pos_14d   = input.int(32,     "Seuil position_14d max pour ROUGE 15h30 (%)",    minval=0, maxval=100, group=grp_filters)
-threshold_rouge_15h45     = input.int(120,    "Seuil b12_range pour ROUGE 15h45 (pts)",         minval=0,  group=grp_filters, tooltip="Alerte tardive : si classification 15h30 etait Orange et b12_range (range des 2 premieres bougies AM) >= ce seuil, bascule en ROUGE 15h45.")
-require_b12_alignment     = input.bool(true,  "Alerte 15h45 : exiger l'alignement B1+B2",       group=grp_filters, tooltip="V1 - Si vrai (recommande), l'alerte ne se declenche que si les corps de B1 et B2 vont dans le meme sens. Filtre les faux positifs yo-yo. Si faux, comportement V0 (range seul). Precision 80% vs 72.7% en V0 sur 2025-2026.")
+threshold_vert_pre_amp    = input.int(130,    "Seuil pre_amp max pour filtre VERT (pts)",       minval=0,  group=grp_filters, tooltip="VERT 15h20 si pre_amp <= ce seuil ET expl_count_5d = 0.")
+threshold_rouge_pre_amp   = input.int(280,    "Seuil pre_amp min pour filtre ROUGE 15h20 (pts)", minval=0, group=grp_filters)
+threshold_rouge_on_amp_h  = input.float(30.0, "Seuil on_amp/h min pour ROUGE 15h20 (pts/heure)", minval=0,  group=grp_filters)
+threshold_rouge_pos_14d   = input.int(32,     "Seuil position_14d max pour ROUGE 15h20 (%)",    minval=0, maxval=100, group=grp_filters)
+threshold_rouge_15h40     = input.int(120,    "Seuil b12_range pour ROUGE 15h40 (pts)",         minval=0,  group=grp_filters, tooltip="Alerte tardive : si classification 15h20 etait Orange et b12_range (range des 2 premieres bougies AM) >= ce seuil, bascule en ROUGE 15h40.")
+require_b12_alignment     = input.bool(true,  "Alerte 15h40 : exiger l'alignement B1+B2",       group=grp_filters, tooltip="V1 - Si vrai (recommande), l'alerte ne se declenche que si les corps de B1 et B2 vont dans le meme sens. Filtre les faux positifs yo-yo. Si faux, comportement V0 (range seul). Precision 88.9% vs 80% en V0 sur 2025-2026 (PDF v2).")
 
 // ── Parametres techniques ────────────────────────────────────────────────────
 grp_tech = "Techniques"
@@ -179,9 +231,11 @@ f_is_cest(t) =>
         false
 
 // Heure (en minutes UTC) d'un horaire Paris donne, gere le DST
+// Wrap modulo 1440 pour les horaires Paris < offset DST (ex: 01h00 Paris en ete = 23h00 UTC jour precedent)
 f_paris_to_utc_min(t, paris_total_min) =>
     paris_offset_h = f_is_cest(t) ? 2 : 1
-    paris_total_min - paris_offset_h * 60
+    raw = paris_total_min - paris_offset_h * 60
+    raw < 0 ? raw + 1440 : raw
 
 // ── Palette de couleurs ──────────────────────────────────────────────────────
 // Reprise de v1.3 : couleurs uniformes avec l'indicateur JCO NY Amplitude Levels
@@ -198,20 +252,20 @@ COL_CLASS_VERT       = #1D9E75
 COL_CLASS_O_FAIBLE   = #7DB249
 COL_CLASS_O_MOYEN    = #C8A437
 COL_CLASS_O_ELEVE    = #E89B2D
-COL_CLASS_ROUGE_15h45 = #D67340   // alerte tardive
-COL_CLASS_ROUGE_15h30 = #D24545
+COL_CLASS_ROUGE_15h40 = #D67340   // alerte tardive
+COL_CLASS_ROUGE_15h20 = #D24545
 
 // ── Helpers de formatage et de labelling ─────────────────────────────────────
 // Labels de classification. Les 3 niveaux Orange sont scindes sur 2 lignes
 // (Orange / faible|moyen|eleve) pour gagner en largeur dans le dashboard.
 f_class_text(c) =>
     switch c
-        1 => "VERT 15h30"
-        2 => "ROUGE 15h30"
+        1 => "VERT 15h20"
+        2 => "ROUGE 15h20"
         3 => "Orange\nfaible"
         4 => "Orange\nmoyen"
         5 => "Orange\neleve"
-        6 => "ROUGE 15h45"
+        6 => "ROUGE 15h40"
         => "—"
 
 // Version courte sans suffixe horaire. Utilisee pour la ligne "Etat ajuste"
@@ -230,31 +284,31 @@ f_class_text_short(c) =>
 f_class_color(c) =>
     switch c
         1 => COL_CLASS_VERT
-        2 => COL_CLASS_ROUGE_15h30
+        2 => COL_CLASS_ROUGE_15h20
         3 => COL_CLASS_O_FAIBLE
         4 => COL_CLASS_O_MOYEN
         5 => COL_CLASS_O_ELEVE
-        6 => COL_CLASS_ROUGE_15h45
+        6 => COL_CLASS_ROUGE_15h40
         => COL_GRAY
 
 f_class_bg(c) =>
     switch c
         1 => color.new(COL_CLASS_VERT,        85)
-        2 => color.new(COL_CLASS_ROUGE_15h30, 80)
+        2 => color.new(COL_CLASS_ROUGE_15h20, 80)
         3 => color.new(COL_CLASS_O_FAIBLE,    85)
         4 => color.new(COL_CLASS_O_MOYEN,     85)
         5 => color.new(COL_CLASS_O_ELEVE,     82)
-        6 => color.new(COL_CLASS_ROUGE_15h45, 80)
+        6 => color.new(COL_CLASS_ROUGE_15h40, 80)
         => DASH_BG
 
 f_class_pexpl(c) =>
     switch c
         1 => 0.0
-        2 => 91.7
-        3 => 8.1
-        4 => 12.0
-        5 => 19.4
-        6 => 72.7
+        2 => 90.9
+        3 => 7.6
+        4 => 13.9
+        5 => 19.2
+        6 => 88.9
         => na
 
 f_weekday_name(d) =>
@@ -324,13 +378,19 @@ f_detect_explosion_c2(o, h, l, c, threshold, max_contr) =>
 
 // ── Calcul des horaires UTC (selon DST) ──────────────────────────────────────
 // Toutes les bornes sont definies en heure Paris puis converties en UTC.
-ny_total_min        = ny_hour * 60 + ny_min     // 930 = 15h30 Paris
+// Note : ny_open reste l'instant reel d'ouverture NY 15h30, pour la collecte
+// des bougies AM. L'evaluation du score, verrouillage, se fait a eval 15h20.
+daily_reset_paris   = 60                         // 60 = 01h00 Paris, reset journalier
+ny_total_min        = ny_hour * 60 + ny_min      // 930 = 15h30 Paris, ouverture NY reelle
+eval_paris          = ny_total_min - 10          // 920 = 15h20 Paris, instant d'evaluation PDF v2
 pre_ny_start_paris  = 14 * 60                    // 840 = 14h00 Paris
 b2_close_paris      = ny_total_min + 10          // 940 = 15h40 Paris, B2 vient de fermer
 ny_end_paris        = ny_total_min + 120         // 1050 = 17h30 Paris
 overnight_start_par = 22 * 60 + 5                // 1325 = 22h05 Paris
 
+daily_reset_utc     = f_paris_to_utc_min(time, daily_reset_paris)
 pre_ny_start_utc    = f_paris_to_utc_min(time, pre_ny_start_paris)
+eval_utc            = f_paris_to_utc_min(time, eval_paris)
 ny_open_utc         = f_paris_to_utc_min(time, ny_total_min)
 b2_close_utc        = f_paris_to_utc_min(time, b2_close_paris)
 ny_end_utc          = f_paris_to_utc_min(time, ny_end_paris)
@@ -360,33 +420,33 @@ var float pre_c = na
 var bool  pre_active = false
 var int   pre_ny_day = -1
 
-// Snapshot pre-NY (final a 15h30)
+// Snapshot pre-NY, final a 15h20
 var float pre_amp_pts = na
 var float pre_net_pts = na
 
-// Accumulateur overnight (22h05 J-1 -> 15h30 J), traverse minuit
+// Accumulateur overnight 22h05 J-1 -> 15h20 J, traverse minuit
 var float on_h = na
 var float on_l = na
 var bool  on_active = false
 var int   on_start_day = -1
 
-// Snapshot overnight (final a 15h30)
+// Snapshot overnight, final a 15h20
 var float on_amp_pts = na
 var float on_amp_per_hour = na
 
-// Storage des bougies AM (15h30 -> 17h25, ~24 bougies M5)
+// Storage des bougies AM 15h30 -> 17h25, ~24 bougies M5
 var array<float> am_opens  = array.new<float>(0)
 var array<float> am_highs  = array.new<float>(0)
 var array<float> am_lows   = array.new<float>(0)
 var array<float> am_closes = array.new<float>(0)
 
-// Snapshot 15h30 (NY open)
-var float ny_open_value     = na
+// Snapshot eval, 15h20
+var float eval_value     = na
 var float position_14d_pts  = na
-var int   ny_open_day       = -1
+var int   eval_day       = -1
 var int   expl_count_5d     = 0
 
-// Snapshot 15h40 (B2 fermee) -> alerte tardive eventuelle
+// Snapshot 15h40, B2 fermee -> alerte tardive eventuelle
 var float b12_range = na
 var int   b1_dir = 0       // direction du corps B1 : +1 haussier, -1 baissier, 0 doji
 var int   b2_dir = 0       // direction du corps B2
@@ -400,11 +460,35 @@ var int   ny_end_day = -1
 // Score & classification
 var int  score          = 0      // -1 a +5
 var int  classification = 0      // 0 = pas encore calcule, 1-6 = niveaux, peut basculer en 6 a 15h40
-var int  classification_15h30 = 0  // classification figee a 15h30, AVANT alerte tardive eventuelle
-var bool score_locked   = false  // true apres 15h30, false pendant pre-NY
+var int  classification_15h20 = 0  // classification figee a 15h20, AVANT alerte tardive eventuelle
+var bool score_locked   = false  // true apres 15h20, false pendant pre-NY
+
+// Reset journalier a 1h00 Paris : tracker du jour ou le reset a deja fire
+var int  daily_reset_day = -1
 
 // Reset de la classification a 14h00 pour signaler "EN COURS"
-// (la classification finale n'est etablie qu'a 15h30)
+// La classification finale n'est etablie qu'a 15h20.
+
+// ── Trigger 0 : reset journalier (1h00 Paris) ───────────────────────────────
+// Purge tous les verdicts et donnees de la veille, sauf les structures qui
+// doivent persister : recent_expl_days, am_*, on_active. La phase
+// structurelle (1h00 -> 14h00) reprendra ensuite le calcul du score.
+fire_daily_reset = utc_total == daily_reset_utc and day_id != daily_reset_day
+if fire_daily_reset
+    daily_reset_day := day_id
+    classification := 0
+    classification_15h20 := 0
+    score_locked := false
+    pre_amp_pts := na
+    pre_net_pts := na
+    on_amp_pts := na
+    on_amp_per_hour := na
+    b12_range := na
+    b1_dir := 0
+    b2_dir := 0
+    b12_aligned := false
+    position_14d_pts := na
+    expl_count_5d := 0
 
 // ── Trigger 1 : pre-NY start (14h00 Paris) ──────────────────────────────────
 fire_pre_ny_start = utc_total == pre_ny_start_utc and day_id != pre_ny_day
@@ -416,15 +500,15 @@ if fire_pre_ny_start
     pre_o := open
     pre_c := close
     // Reset des classifications : on entre en phase "EN COURS"
-    // classification et classification_15h30 doivent etre remises a zero
+    // classification et classification_15h20 doivent etre remises a zero
     // sinon le dashboard affiche encore le verdict de la veille pendant
     // la pre-NY (texte de l'ancienne classe avec un BG gris -> incoherent).
     classification := 0
-    classification_15h30 := 0
+    classification_15h20 := 0
     score_locked := false
 
-// Accumulation pre-NY pendant 14h00-15h25 (inclus)
-if pre_active and not fire_pre_ny_start and utc_total >= pre_ny_start_utc and utc_total < ny_open_utc and day_id == pre_ny_day
+// Accumulation pre-NY pendant 14h00-15h20 exclu, soit 16 bougies M5 14h00..15h15
+if pre_active and not fire_pre_ny_start and utc_total >= pre_ny_start_utc and utc_total < eval_utc and day_id == pre_ny_day
     pre_h := math.max(pre_h, high)
     pre_l := math.min(pre_l, low)
     pre_c := close
@@ -437,7 +521,7 @@ if fire_overnight_start
     on_h := high
     on_l := low
 
-// Accumulation overnight (jusqu'au reset suivant a 15h30)
+// Accumulation overnight jusqu'a 15h20 inclus, stoppe au snapshot eval
 if on_active and not fire_overnight_start
     on_h := math.max(on_h, high)
     on_l := math.min(on_l, low)
@@ -446,33 +530,34 @@ if on_active and not fire_overnight_start
 // On push la donnee de la bougie PRECEDENTE (bar[1]) car elle est confirmee.
 // Sur 24 bougies AM (15h30 -> 17h25), cela fait 24 push pendant les bars
 // 15h35 -> 17h30 (inclus).
-push_am = utc_total > ny_open_utc and utc_total <= ny_end_utc and day_id == ny_open_day
+push_am = utc_total > ny_open_utc and utc_total <= ny_end_utc and day_id == eval_day
 if push_am
     array.push(am_opens,  open[1])
     array.push(am_highs,  high[1])
     array.push(am_lows,   low[1])
     array.push(am_closes, close[1])
 
-// ── Trigger 3 : NY open (15h30) — calcul final & classification ─────────────
-fire_ny_open = utc_total == ny_open_utc and day_id != ny_open_day
-if fire_ny_open
-    ny_open_day := day_id
+// ── Trigger 3 : evaluation 15h20 — calcul final & classification ────────────
+fire_eval_time = utc_total == eval_utc and day_id != eval_day
+if fire_eval_time
+    eval_day := day_id
 
-    // Snapshot pre-NY (range et net)
+    // Snapshot pre-NY 14h00-15h20 : range et net cumules sur 16 bougies M5
     pre_amp_pts := pre_active ? pre_h - pre_l : na
     pre_net_pts := pre_active ? pre_c - pre_o : na
     pre_active := false
 
-    // Snapshot overnight (range et pts par heure)
-    // Duree fixe : 22h05 a 15h30 = 17h25 = 17.4167 heures
+    // Snapshot overnight 22h05 J-1 -> 15h20 J : range et pts par heure
+    // Duree fixe : 17h15 = 17.25 heures
     on_amp_pts := on_active ? on_h - on_l : na
-    on_amp_per_hour := not na(on_amp_pts) ? on_amp_pts / (17.0 + 25.0 / 60.0) : na
+    on_amp_per_hour := not na(on_amp_pts) ? on_amp_pts / 17.25 : na
     on_active := false
 
-    // Snapshot NY open value & position dans le range 14 jours
-    ny_open_value := open
+    // Snapshot eval value et position dans le range 14 jours
+    // open de la bougie 15h20-15h25, prix de reference pour position_14d
+    eval_value := open
     range_14d_now = high_14d - low_14d
-    position_14d_pts := range_14d_now > 0 ? (ny_open_value - low_14d) / range_14d_now * 100 : 50.0
+    position_14d_pts := range_14d_now > 0 ? (eval_value - low_14d) / range_14d_now * 100 : 50.0
 
     // Compter les explosions parmi les jours dans recent_expl_days
     int count = 0
@@ -498,9 +583,9 @@ if fire_ny_open
     // Classification : filtres extremes d'abord, puis bandes du score
     int c = 0
     if not na(pre_amp_pts) and pre_amp_pts <= threshold_vert_pre_amp and expl_count_5d == 0
-        c := 1   // VERT 15h30
+        c := 1   // VERT 15h20
     else if not na(pre_amp_pts) and not na(on_amp_per_hour) and not na(position_14d_pts) and pre_amp_pts >= threshold_rouge_pre_amp and on_amp_per_hour >= threshold_rouge_on_amp_h and position_14d_pts <= threshold_rouge_pos_14d
-        c := 2   // ROUGE 15h30
+        c := 2   // ROUGE 15h20
     else if score <= 0
         c := 3   // Orange-faible
     else if score <= 2
@@ -508,7 +593,7 @@ if fire_ny_open
     else
         c := 5   // Orange-eleve
     classification := c
-    classification_15h30 := c  // copie figee, ne sera PAS modifiee par l'alerte 15h45
+    classification_15h20 := c  // copie figee, ne sera PAS modifiee par l'alerte 15h40
     score_locked := true
 
     // Reset du storage AM pour la nouvelle journee
@@ -518,7 +603,7 @@ if fire_ny_open
     array.clear(am_closes)
 
 // ── Trigger 4 : B2 close (15h40) — alerte tardive eventuelle ────────────────
-fire_b2_close = utc_total == b2_close_utc and day_id != b2_close_day and day_id == ny_open_day
+fire_b2_close = utc_total == b2_close_utc and day_id != b2_close_day and day_id == eval_day
 if fire_b2_close
     b2_close_day := day_id
     // B1 = bougie 15h30-15h35 (bar[2] sur le 15h40)
@@ -537,15 +622,15 @@ if fire_b2_close
     b2_dir := body_b2 > 0 ? 1 : body_b2 < 0 ? -1 : 0
     b12_aligned := b1_dir == b2_dir and b1_dir != 0
 
-    // Bascule ROUGE 15h45 si classification etait Orange (3/4/5),
-    // b12_range >= seuil, et alignement OK (si require_b12_alignment).
-    range_ok = b12_range >= threshold_rouge_15h45
+    // Bascule ROUGE 15h40 si classification etait Orange 3/4/5,
+    // b12_range >= seuil, et alignement OK si require_b12_alignment.
+    range_ok = b12_range >= threshold_rouge_15h40
     align_ok = not require_b12_alignment or b12_aligned
     if (classification == 3 or classification == 4 or classification == 5) and range_ok and align_ok
-        classification := 6   // ROUGE 15h45
+        classification := 6   // ROUGE 15h40
 
 // ── Trigger 5 : NY end (17h30) — detection c2 + push historique ─────────────
-fire_ny_end = utc_total == ny_end_utc and day_id != ny_end_day and day_id == ny_open_day
+fire_ny_end = utc_total == ny_end_utc and day_id != ny_end_day and day_id == eval_day
 if fire_ny_end
     ny_end_day := day_id
     // push_am vient de pusher la derniere bougie (17h25) sur ce meme bar
@@ -555,11 +640,11 @@ if fire_ny_end
     while array.size(recent_expl_days) > regime_window
         array.shift(recent_expl_days)
 
-// ── Score provisoire pendant la pre-NY (14h00 -> 15h30) ─────────────────────
+// ── Score provisoire pendant la pre-NY 14h00 -> 15h20 ───────────────────────
 // On recalcule a chaque bougie avec les valeurs partielles de pre_amp/pre_net
 // pour l'affichage en temps reel. Le score "structurel" avant 14h00 utilise
-// seulement les 3 leviers stables (weekday, expl_count_5d, position_14d).
-in_pre_ny_window = pre_active and utc_total >= pre_ny_start_utc and utc_total < ny_open_utc and day_id == pre_ny_day
+// seulement les 3 leviers stables : weekday, expl_count_5d, position_14d.
+in_pre_ny_window = pre_active and utc_total >= pre_ny_start_utc and utc_total < eval_utc and day_id == pre_ny_day
 if in_pre_ny_window
     // Valeurs partielles, recalcule sur chaque bougie y compris le bar 14h00
     // ou pre_h/l/o/c viennent juste d'etre initialises par fire_pre_ny_start.
@@ -592,24 +677,56 @@ if in_pre_ny_window
     position_14d_pts := prov_pos_14d
     score_locked := false
 
+// ── Score structurel (entre 1h00 et 14h00, avant la pre-NY) ─────────────────
+// Recalcul continu du score avec les 3 leviers stables uniquement :
+//   weekday, expl_count_5d, position_14d (estimee via close en proxy)
+// Les leviers pre_amp/pre_net restent na (affiches en "—" dans le dashboard).
+// La classification reste 0 -> fond gris du panneau.
+in_structural_window = day_id == daily_reset_day and not pre_active and not score_locked
+if in_structural_window
+    // Position 14d estimee via close, sera remplacee par open 15h20 au verrouillage
+    range_14d_now = high_14d - low_14d
+    position_14d_pts := range_14d_now > 0 ? (close - low_14d) / range_14d_now * 100 : 50.0
+    // Comptage des explosions dans la fenetre glissante 5 jours
+    int struct_count = 0
+    if array.size(recent_expl_days) > 0
+        for i = 0 to array.size(recent_expl_days) - 1
+            if array.get(recent_expl_days, i)
+                struct_count += 1
+    expl_count_5d := struct_count
+    // Score structurel : 3 leviers stables, plage -1 a +3
+    int s = 0
+    s += f_weekday_lever(weekday)
+    if struct_count >= threshold_expl_5d
+        s += 1
+    if position_14d_pts <= threshold_position_14d
+        s += 1
+    score := s
+
 // ── Dashboard ────────────────────────────────────────────────────────────────
 // Mode Masque : pas d'affichage. Mode Complet : 13 lignes. Mode Simplifie : 3 lignes.
 // Les deux modes ajoutent dash_padding lignes transparentes en bas pour empiler
 // un dashboard secondaire au meme coin (typiquement JCO NY Amplitude Levels).
 if dash_mode != "Masque" and barstate.islast
-    // Couleur de fond du panneau : reflet de la classification COURANTE
-    // (incluant donc une eventuelle bascule ROUGE 15h45). Permet la lecture
+    // Couleur de fond du panneau : reflet de la classification COURANTE,
+    // incluant une eventuelle bascule ROUGE 15h40. Permet la lecture
     // visuelle rapide de l'urgence.
     panel_bg = f_class_bg(classification)
 
-    // Etat (verdict 15h30) - figé apres l'open NY AM, ne bouge pas a 15h40
-    class_15h30_txt = classification_15h30 == 0 ? (in_pre_ny_window ? "EN COURS" : "—") : f_class_text(classification_15h30)
-    class_15h30_col = f_class_color(classification_15h30)
-    pexpl_15h30 = f_class_pexpl(classification_15h30)
+    // Etat verdict 15h20, fige a l'evaluation, ne bouge pas a 15h40
+    // Label selon la phase :
+    //   - classification connue : nom de la classe (VERT, Orange-X, ROUGE)
+    //   - phase provisoire 14h00-15h20 : "EN COURS"
+    //   - phase structurelle 1h00-14h00 : "Structurel"
+    //   - sinon : tiret (chargement initial, ou entre 22h et 1h)
+    in_structural_phase = day_id == daily_reset_day and not pre_active and classification == 0
+    class_15h20_txt = classification_15h20 == 0 ? (in_pre_ny_window ? "EN COURS" : (in_structural_phase ? "Structurel" : "—")) : f_class_text(classification_15h20)
+    class_15h20_col = f_class_color(classification_15h20)
+    pexpl_15h20 = f_class_pexpl(classification_15h20)
 
-    // Etat ajuste (apres bascule 15h45 eventuelle) - visible a partir de 15h40
-    // Utilise f_class_text_short pour ne pas afficher le suffixe horaire
-    // (incompatible avec les semaines de transition DST).
+    // Etat ajuste apres bascule 15h40 eventuelle, visible a partir de 15h40
+    // Utilise f_class_text_short pour ne pas afficher le suffixe horaire,
+    // incompatible avec les semaines de transition DST.
     past_b2_close = day_id == b2_close_day
     adj_txt = past_b2_close ? f_class_text_short(classification) : "—"
     adj_col = past_b2_close ? f_class_color(classification) : COL_GRAY
@@ -623,7 +740,7 @@ if dash_mode != "Masque" and barstate.islast
 
     // Etat detaille de l'alerte tardive (visible a partir de 15h40)
     b12_avail        = day_id == b2_close_day
-    b12_range_ok     = b12_avail and b12_range >= threshold_rouge_15h45
+    b12_range_ok     = b12_avail and b12_range >= threshold_rouge_15h40
     b12_range_text   = b12_avail ? f_fmt_pts(b12_range) : "—"
     b12_dir_text     = b12_avail ? ("B1" + f_dir_arrow(b1_dir) + " B2" + f_dir_arrow(b2_dir)) : "—"
     b12_align_active = b12_avail and b12_aligned
@@ -632,19 +749,19 @@ if dash_mode != "Masque" and barstate.islast
         // ─── MODE COMPLET 3 COLONNES : Label | Valeur | Indicateur seuil ────
         var table tbl_full = table.new(position.bottom_right, 3, 13 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-        // Ligne 0 : Etat (verdict 15h30, fige)
+        // Ligne 0 : Etat verdict 15h20, fige
         table.cell(tbl_full, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 0, class_15h30_txt,   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_full, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
         table.cell(tbl_full, 2, 0, "",                bgcolor=panel_bg, text_size=size.small)
 
         // Ligne 1 : Score
         table.cell(tbl_full, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
         table.cell(tbl_full, 2, 1, "",                     bgcolor=panel_bg, text_size=size.small)
 
         // Ligne 2 : P(expl)
         table.cell(tbl_full, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_15h30),  bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
         table.cell(tbl_full, 2, 2, "",                       bgcolor=panel_bg, text_size=size.small)
 
         // Ligne 3 : separateur
@@ -685,7 +802,7 @@ if dash_mode != "Masque" and barstate.islast
         // Ligne 10 : b12 range (range cumule des 2 premieres bougies AM)
         table.cell(tbl_full, 0, 10, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
         table.cell(tbl_full, 1, 10, b12_range_text,   bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 10, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h45) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
+        table.cell(tbl_full, 2, 10, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h40) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
 
         // Ligne 11 : b12 align (direction des corps B1 et B2)
         table.cell(tbl_full, 0, 11, "b12 align",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
@@ -721,15 +838,15 @@ if dash_mode != "Masque" and barstate.islast
 
         // Ligne 0 : Etat
         table.cell(tbl_compact, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 0, class_15h30_txt,   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_compact, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
 
         // Ligne 1 : Score
         table.cell(tbl_compact, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
 
         // Ligne 2 : P(expl)
         table.cell(tbl_compact, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_15h30),  bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
 
         // Ligne 3 : separateur
         table.cell(tbl_compact, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
@@ -783,8 +900,8 @@ if dash_mode != "Masque" and barstate.islast
 
     if dash_mode == "Simplifie"
         // ─── MODE SIMPLIFIE : 2 colonnes x 4 lignes (+ padding) ─────────────
-        // Titre / Etat 15h30 / P(expl) / Etat ajuste (apres 15h40)
-        // Les variables class_15h30_txt, class_15h30_col, pexpl_15h30,
+        // Titre / Etat 15h20 / P(expl) / Etat ajuste a partir de 15h40
+        // Les variables class_15h20_txt, class_15h20_col, pexpl_15h20,
         // adj_txt, adj_col sont definies dans le scope commun en amont.
         var table tbl_s = table.new(position.bottom_right, 2, 4 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
@@ -792,13 +909,13 @@ if dash_mode != "Masque" and barstate.islast
         table.cell(tbl_s, 0, 0, "NY AM",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
         table.cell(tbl_s, 1, 0, "risk expl", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small)
 
-        // Ligne 1 : Etat 15h30
+        // Ligne 1 : Etat 15h20
         table.cell(tbl_s, 0, 1, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 1, class_15h30_txt,   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_s, 1, 1, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
 
         // Ligne 2 : P(expl)
         table.cell(tbl_s, 0, 2, "P(expl)",                 bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_15h30),   bgcolor=panel_bg, text_color=class_15h30_col, text_size=size.small)
+        table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_15h20),   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
 
         // Ligne 3 : Etat ajuste (a partir de 15h40, sans suffixe horaire)
         table.cell(tbl_s, 0, 3, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
