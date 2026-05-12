@@ -2,9 +2,13 @@
 
 ![JCO Directional Day](screenshot.png)
 
-Indicateur TradingView Pine Script v6 d'**anticipation du risque d'explosion** sur la session NY AM du NQ Futures (Nasdaq 100), pour le scalp contrarien.
+Indicateur TradingView Pine Script v6 d'**anticipation du risque d'explosion** sur les sessions NY AM **et NY PM** du NQ Futures (Nasdaq 100), pour le scalp contrarien.
 
-À partir des informations disponibles **avant l'ouverture NY**, il classe la journée selon son risque d'explosion ≥ 200 pts en **6 niveaux**, via un score composite à 5 leviers et 2 filtres extrêmes. Le verdict est posé à **15h20** (10 min avant l'ouverture NY), laissant le temps de préparer le placement d'ordres. Une alerte tardive au close de la 2ᵉ bougie AM (**15h40**) permet de capter les explosions qui se révèlent dès les premières bougies.
+**Module AM** : à partir des informations disponibles **avant l'ouverture NY** (15h30 Paris), classe la journée selon son risque d'explosion ≥ 200 pts en **6 niveaux**, via un score composite à 5 leviers et 2 filtres extrêmes. Verdict posé à **15h20** (10 min avant l'ouverture). Alerte tardive au close de B2 (**15h40**) pour capter les explosions des 2 premières bougies.
+
+**Module PM** (extension v2.2.0, activable) : à partir des informations disponibles **avant l'ouverture NY PM** (18h30 Paris), classe la session selon son risque d'explosion ≥ 150 pts en **7 niveaux**, via un score composite à 5 leviers (dont `am_expl` comme pont AM→PM) et 3 filtres extrêmes (VERT, ROUGE 18h20, ROUGE FOMC). Verdict posé à **18h20**, alerte tardive à **18h40**.
+
+Le dashboard bascule automatiquement de AM à PM à **18h00 Paris**, avec rappel cross-session du verdict de l'autre côté.
 
 Inclut un greffon **FVG (Fair Value Gap)** qui repeint en jaune les bougies au centre d'un gap, avec filtre configurable sur la taille minimum.
 
@@ -78,6 +82,82 @@ L'indicateur évolue selon l'heure Paris :
 Le dashboard distingue **Etat** (verdict 15h20, ne change jamais après) et **Etat ajusté** (classification courante, peut basculer à 15h40).
 
 Reset journalier à **1h00 Paris** (heure fixe) : purge des verdicts de la veille avant que la phase structurelle ne reprenne le calcul du score.
+
+---
+
+## Module NY PM (v2.2.0)
+
+Extension symétrique du module AM, calibrée sur l'étude `NQ_Anticipation_NY_PM_Score_v4.pdf` (334 jours 2025–2026, recall ROUGES = 51%). Activable / désactivable via l'input `Activer le module Risk Assessment NY PM`.
+
+### Les 5 leviers PM (score 0–5)
+
+| # | Levier | Condition | Effet |
+|---|--------|-----------|-------|
+| 1a | `pre_pm_amp_pts` | ≥ 140 | +1 (range pré-PM 17h20–18h20) |
+| 1b | `pre_pm_net_pts` | ≤ −100 | +1 (net pré-PM 17h20–18h20) |
+| 2 | `am_expl` | l'AM du jour J a explosé | +1 (pont AM→PM, seuil c2 200) |
+| 3 | `expl_pm_count_5d` | ≥ 2 sur 5 jours | +1 (régime explosif PM, seuil c2 150) |
+| 4 | `position_in_14d_pm` | ≤ 30% | +1 (proche du plus bas 14j à 18h20) |
+
+Différences clés vs AM :
+
+- Pas de levier calendaire `weekday` (donc score ≥ 0)
+- Seuil c2 plus bas (150 vs 200 pts) car l'amplitude PM est mécaniquement plus faible
+- `am_expl` remplace le levier `weekday` comme 3ᵉ contributeur
+
+### Les 7 niveaux PM
+
+| Niveau | Règle | Action |
+|--------|-------|--------|
+| 🔴🔴 **ROUGE FOMC** | `is_fomc == true` (prioritaire sur tout) | Pas de scalp, jour FOMC |
+| 🟢 **VERT 18h20** | `pre_pm_amp ≤ 80` ET `expl_pm_5d = 0` | Scalp contrarian sans crainte |
+| 🟩 **Orange-faible** | score ≤ 0 | Contrarian taille standard |
+| 🟨 **Orange-moyen** | score 1–2 | Contrarian, gestion stricte |
+| 🟧 **Orange-élevé** | score ≥ 3 | Taille réduite, stops serrés |
+| 🟥 **ROUGE 18h40** | Orange ET `b12_range_pm ≥ 80` (**pas** d'alignement) | Sortir ou réduire, alerte tardive |
+| 🔴 **ROUGE 18h20** | `pre_pm_amp ≥ 140` ET `pos_14d ≤ 30` ET `am_expl == true` | Pas de contrarian |
+
+Différence importante vs AM : l'alerte tardive PM **n'exige pas l'alignement directionnel B1+B2** (PDF v4 Section 5). Le seul critère est `b12_range_pm ≥ 80 pts`. C'est plus permissif que la V1 AM, calibré sur le comportement PM observé.
+
+### Liste FOMC
+
+16 dates 2025–2026 codées en dur dans l'indicateur (extensible). Quand le jour J est un FOMC, la classification PM passe automatiquement en **ROUGE FOMC** (prioritaire sur tous les autres filtres).
+
+### Workflow temporel PM
+
+| Heure | Évènement | Affichage |
+|-------|-----------|-----------|
+| 17h20 | Début accumulation pré-PM | (calculs en arrière-plan) |
+| **18h00** | **Bascule visuelle AM → PM** | Le dashboard montre désormais les leviers PM (encore partiels) |
+| 18h20 | Décision préparatoire PM | Classification PM verrouillée, `Etat PM` figé |
+| 18h30 | Ouverture session PM réelle | Push des bougies PM commence |
+| 18h40 | Alerte tardive PM (close B2) | Bascule éventuelle vers **ROUGE 18h40** |
+| 20h30 | Fin session PM | Détection c2 PM (seuil 150) + push dans historique 5j |
+
+### Dashboard étendu
+
+Le dashboard bascule à **18h00 Paris** entre layout AM (13 lignes + 1 ligne `Etat PM` cross-session) et layout PM (13 lignes + 1 ligne `Etat AM` cross-session figée). Trois modes inchangés (Masque / Complet 3-col / Complet 2-col / Simplifié).
+
+**Exemple Complet 3-col mode PM** :
+
+```text
+Etat AM     │ Orange-moyen   │
+Etat PM     │ ROUGE 18h20    │
+Score       │ +4             │
+P(expl)     │ —              │
+─────────────────────────────────
+pre_pm_amp  │ 253 pts        │ ✓ (>= 140)
+pre_pm_net  │ −180 pts       │ ✓ (<= −100)
+am_expl     │ True           │ ✓
+expl_pm_5d  │ 2              │ ✓ (>= 2)
+pos_14d_pm  │ −46.0%         │ ✓ (<= 30%)
+is_fomc     │ False          │
+─────────────────────────────────
+b12 range   │ —              │
+Etat ajuste │ —
+```
+
+Pour le module PM désactivé, le dashboard reste exactement comme en v2.1.0 (aucune bascule, aucune référence PM).
 
 ---
 
@@ -205,10 +285,23 @@ Toutes les autres bornes temporelles (reset 1h00, pré-NY 14h00, évaluation 15h
 
 ### Paramètres techniques
 
-- **Seuil pts pour explosion c2** : 200
+- **Seuil pts pour explosion c2 AM** : 200
 - **Max bougies contraires dans une séquence c2** : 2
 - **Fenêtre du range structurel** : 14 jours
 - **Fenêtre du compteur d'explosions** : 5 jours
+
+### Module PM (v2.2.0)
+
+- **Activer le module Risk Assessment NY PM** : on/off (défaut on). Si décoché, le dashboard reste en comportement v2.1.0.
+- **Seuil pre_pm_amp pour +1 au score PM** : 140 pts
+- **Seuil pre_pm_net pour +1 au score PM** : −100 pts
+- **Nb explosions PM sur 5j pour +1 au score PM** : 2
+- **Position dans range 14j (%) pour +1 au score PM** : 30
+- **Seuil pre_pm_amp max pour filtre VERT PM** : 80 pts
+- **Seuil pre_pm_amp min pour filtre ROUGE 18h20** : 140 pts
+- **Seuil position_14d_pm max pour ROUGE 18h20** : 30%
+- **Seuil b12_range_pm pour ROUGE 18h40** : 80 pts (pas d'alignement requis)
+- **Seuil pts pour explosion c2 PM** : 150
 
 ### FVG
 
@@ -247,6 +340,24 @@ Toutes les autres bornes temporelles (reset 1h00, pré-NY 14h00, évaluation 15h
 ---
 
 ## Changelog
+
+### v2.2.0 - 2026-05-12
+
+**Extension : module Risk Assessment NY PM**. Le module AM est inchangé fonctionnellement.
+
+- Source : étude `NQ_Anticipation_NY_PM_Score_v4.pdf` (334 jours, recall ROUGES 51%).
+- Session PM 18h30–20h30 Paris : évaluation à **18h20**, alerte tardive à **18h40**, fin à 20h30.
+- **Score composite PM à 5 leviers**, plage 0–5 :
+  - `pre_pm_amp_pts ≥ 140` (range 17h20–18h20)
+  - `pre_pm_net_pts ≤ −100`
+  - `am_expl == true` (pont AM→PM, levier inédit)
+  - `expl_pm_count_5d ≥ 2` (régime explosif PM, seuil c2 PM = 150 pts)
+  - `position_14d_pm ≤ 30%`
+- **7 niveaux de risque PM** : ROUGE FOMC (prioritaire), VERT 18h20, ROUGE 18h20, Orange-faible/moyen/élevé, ROUGE 18h40 (alerte tardive, **sans alignement** — différence clé vs AM).
+- **Détection c2 PM** avec seuil 150 pts (vs 200 AM), ring buffer `recent_pm_expl_days` séparé.
+- **Liste FOMC 2025–2026** codée en dur (16 dates). Extensible.
+- **Dashboard étendu** : bascule visuelle AM → PM à 18h00 Paris. Trois modes étendus (Complet 3-col, Complet 2-col, Simplifié), chacun avec un layout PM dédié de 14 lignes. Rappel cross-session : ligne `Etat AM` (figé) sur le panneau PM, ligne `Etat PM` (à venir) sur le panneau AM.
+- **Module désactivable** via input `Activer le module Risk Assessment NY PM` (défaut on). Si décoché, comportement strictement identique à v2.1.0.
 
 ### v2.1.0 - 2026-05-12
 

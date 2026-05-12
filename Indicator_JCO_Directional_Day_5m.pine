@@ -1,17 +1,26 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 2.1.0
+// Version: 2.2.0
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
-// Description: Indicateur Risk Assessment NY AM bâti sur l'étude statistique
-//              "Anticiper les explosions sur la session NY AM" (PDF v2, Mai
-//              2026, 340 jours analyses, 46 explosions >= 200 pts c2).
+// Description: Indicateur Risk Assessment NY AM + NY PM bati sur deux etudes
+//              statistiques distinctes :
+//              - AM : "Anticiper les explosions sur la session NY AM" (PDF v2,
+//                Mai 2026, 340 jours, 46 explosions >= 200 pts c2).
+//              - PM : "NQ Anticipation NY PM Score v4" (Mai 2026, 334 jours,
+//                explosions >= 150 pts c2, recall ROUGES 51%).
 //
-//              Objectif : a 15h20 Paris (10 min avant l'ouverture NY AM),
+//              Objectif AM : a 15h20 Paris (10 min avant l'ouverture NY AM),
 //              classer la journee selon son risque d'explosion en 6 niveaux,
 //              sur la base d'un score composite a 5 leviers + 2 filtres
 //              extremes + 1 alerte tardive a 15h40.
+//
+//              Objectif PM : a 18h20 Paris (10 min avant l'ouverture NY PM),
+//              classer la session selon son risque d'explosion en 7 niveaux,
+//              sur la base d'un score composite a 5 leviers (dont am_expl
+//              comme pont AM->PM) + 3 filtres extremes (VERT, ROUGE 18h20,
+//              ROUGE FOMC) + 1 alerte tardive a 18h40 (sans alignement).
 //
 //              Les 5 leviers du score composite (evalues a 15h20) :
 //                1a  pre_amp_pts     >= 240   +1   range pre-NY 14h00-15h20
@@ -53,14 +62,20 @@
 //              Greffon FVG inchange depuis v1.2 : repeint en jaune les bougies
 //              au centre d'un "Fair Value Gap" (low[1]>high[3] ou high[1]<low[3]).
 //
-//              Dashboard en bas a droite, trois modes :
+//              Dashboard en bas a droite, trois modes. Bascule visuelle a
+//              18h00 Paris : avant 18h le panneau affiche les leviers AM,
+//              apres 18h les leviers PM. Une ligne cross-session permet de
+//              voir l'autre verdict de la journee (Etat AM fige sur le
+//              panneau PM, Etat PM a venir sur le panneau AM).
 //                - Masque    : pas d'affichage
-//                - Complet   : 13 lignes (Etat / Score / P(expl) / 5 leviers /
-//                              b12 range / b12 align / Etat ajuste). En 3
-//                              colonnes avec seuils par defaut, ou 2 colonnes
-//                              compactes avec couleur des leviers indiquant
-//                              leur validation.
-//                - Simplifie : 4 lignes (titre / Etat / P(expl) / Etat ajuste)
+//                - Complet   : 14 lignes. AM 3-col : Etat / Score / P(expl) /
+//                              sep / 5 leviers / sep / b12 range / b12 align /
+//                              Etat ajuste / Etat PM. PM 3-col : Etat AM /
+//                              Etat PM / Score / P(expl) / sep / 6 leviers /
+//                              sep / b12 range / Etat ajuste. Variante 2-col
+//                              avec couleur des leviers indiquant validation.
+//                - Simplifie : 5 lignes (titre / Etat session active /
+//                              P(expl) / Etat ajuste / Etat autre session)
 //              Padding configurable pour empiler avec un dashboard secondaire.
 //
 // Source statistique : "NQ Anticipation des explosions sur NY AM" (Mai 2026,
@@ -80,6 +95,43 @@
 //   le critere c2 est rempli. Si oui, le jour est marque "explose".
 //
 // Changelog:
+//   v2.2.0 - 2026-05-12
+//     - Extension : module Risk Assessment NY PM. Source PDF v4
+//       "NQ Anticipation NY PM Score v4" (334 jours, recall ROUGES 51%).
+//       Le module AM est inchange.
+//     - Session PM 18h30-20h30 Paris : evaluation a 18h20, alerte tardive
+//       a 18h40, fin de session a 20h30.
+//     - Score composite PM a 5 leviers, plage 0-5 :
+//         pre_pm_amp_pts   >= 140   +1   range pre-PM 17h20-18h20
+//         pre_pm_net_pts   <= -100  +1   net pre-PM 17h20-18h20
+//         am_expl == true           +1   l'AM du jour J a explose
+//         expl_pm_count_5d >= 2     +1   regime explosif PM recent (seuil c2 150)
+//         position_14d_pm  <= 30%   +1   proche du plus bas 14j a 18h20
+//     - 7 niveaux de risque PM :
+//         1  ROUGE FOMC     is_fomc == true (prioritaire)
+//         2  VERT 18h20     pre_pm_amp <= 80 ET expl_pm_5d == 0
+//         3  ROUGE 18h20    pre_pm_amp >= 140 ET pos_14d <= 30 ET am_expl
+//         4  Orange-faible  score <= 0
+//         5  Orange-moyen   score 1-2
+//         6  Orange-eleve   score >= 3
+//         7  ROUGE 18h40    orange ET b12_range_pm >= 80 (PAS d'alignement)
+//     - Detection c2 PM avec seuil 150 pts (vs 200 AM), ring buffer
+//       recent_pm_expl_days separe.
+//     - am_expl_today : nouvelle variable persistante set a fire_ny_end,
+//       lue par fire_pm_eval comme levier PM.
+//     - Liste FOMC 2025-2026 codee en dur (16 dates). Extensible.
+//     - Dashboard : bascule visuelle AM -> PM a 18h00 Paris. Trois modes
+//       etendus (Complet 3-col, Complet 2-col, Simplifie), chacun avec
+//       un layout PM dedie de 14 lignes. Rappel cross-session : ligne
+//       "Etat AM" (fige) sur le panneau PM, ligne "Etat PM" (a venir)
+//       sur le panneau AM.
+//     - Layout PM optimise UX : libelle "Etat PM" explicite pour distinguer
+//       du rappel cross-session "Etat AM", Etat AM et Etat PM sur lignes
+//       adjacentes sans separateur, separateur ajoute avant b12 range pour
+//       isoler la confirmation finale de l'alerte tardive.
+//     - Module PM desactivable via input enable_pm_module (defaut on).
+//       Si desactive, le dashboard se comporte exactement comme en v2.1.0.
+//
 //   v2.1.0 - 2026-05-12
 //     - Evaluation deplacee de 15h30 a 15h20 (10 min avant ouverture NY AM).
 //       Justification PDF v2 Section 4 : correlation pre_amp/pre_net a 0.98
@@ -207,10 +259,26 @@ require_b12_alignment     = input.bool(true,  "Alerte 15h40 : exiger l'alignemen
 
 // ── Parametres techniques ────────────────────────────────────────────────────
 grp_tech = "Techniques"
-explosion_threshold_pts   = input.int(200, "Seuil pts pour detecter une explosion c2",          minval=0, group=grp_tech, tooltip="|close_last - open_first| >= ce seuil sur la sequence.")
+explosion_threshold_pts   = input.int(200, "Seuil pts pour detecter une explosion c2 AM",       minval=0, group=grp_tech, tooltip="|close_last - open_first| >= ce seuil sur la sequence AM.")
 explosion_max_contraries  = input.int(2,   "Max bougies contraires dans une sequence c2",       minval=0, group=grp_tech)
 position_window           = input.int(14,  "Fenetre du range structurel (jours)",                minval=1, group=grp_tech)
 regime_window             = input.int(5,   "Fenetre du compteur d'explosions recentes (jours)", minval=1, group=grp_tech)
+
+// ── Module PM (extension v2.2.0) ─────────────────────────────────────────────
+grp_pm = "Module PM"
+enable_pm_module          = input.bool(true, "Activer le module Risk Assessment NY PM",          group=grp_pm, tooltip="Si decoche, le dashboard se comporte exactement comme en v2.1.0 (AM seul, pas de bascule visuelle a 18h00).")
+// Score composite PM (5 leviers, plage 0-5)
+threshold_pre_pm_amp      = input.int(140,  "Seuil pre_pm_amp pour +1 au score PM (pts)",       minval=0,  group=grp_pm, tooltip="Range pre-PM 17h20-18h20. Levier active si >= ce seuil.")
+threshold_pre_pm_net      = input.int(-100, "Seuil pre_pm_net pour +1 au score PM (pts, neg)",   maxval=0, group=grp_pm, tooltip="Net pre-PM 17h20-18h20. Levier active si <= ce seuil baissier.")
+threshold_pm_expl_5d      = input.int(2,    "Nb explosions PM sur 5j pour +1 au score PM",       minval=0,  group=grp_pm, tooltip="Regime explosif PM, seuil c2 PM = 150 pts.")
+threshold_pm_pos_14d      = input.int(30,   "Position dans range 14j (%) pour +1 au score PM",  minval=0, maxval=100, group=grp_pm, tooltip="Proximite plus bas 14j a 18h20. Levier active si <= ce seuil.")
+// Filtres extremes PM
+threshold_pm_vert_amp     = input.int(80,   "Seuil pre_pm_amp max pour filtre VERT PM (pts)",   minval=0,  group=grp_pm, tooltip="VERT 18h20 si pre_pm_amp <= ce seuil ET expl_pm_5d = 0.")
+threshold_pm_rouge_amp    = input.int(140,  "Seuil pre_pm_amp min pour filtre ROUGE 18h20 (pts)", minval=0, group=grp_pm)
+threshold_pm_rouge_pos    = input.int(30,   "Seuil position_14d_pm max pour ROUGE 18h20 (%)",   minval=0, maxval=100, group=grp_pm, tooltip="ROUGE 18h20 si pre_pm_amp >= seuil ET pos <= ce seuil ET am_expl == true.")
+threshold_pm_rouge_18h40  = input.int(80,   "Seuil b12_range_pm pour ROUGE 18h40 (pts)",        minval=0,  group=grp_pm, tooltip="Alerte tardive PM : si Orange a 18h20 et b12_range_pm >= ce seuil, bascule en ROUGE 18h40. PAS d'alignement requis (difference vs AM).")
+// Parametres techniques PM
+pm_explosion_threshold    = input.int(150,  "Seuil pts pour explosion c2 PM",                    minval=0,  group=grp_pm, tooltip="Seuil specifique aux explosions PM, plus bas qu'en AM 200 pts.")
 
 // ── Detection heure d'ete Paris (CEST = GMT+2) ───────────────────────────────
 // Dernier dimanche de mars -> dernier dimanche d'octobre
@@ -237,6 +305,16 @@ f_paris_to_utc_min(t, paris_total_min) =>
     raw = paris_total_min - paris_offset_h * 60
     raw < 0 ? raw + 1440 : raw
 
+// ── Dates FOMC 2025-2026, levier prioritaire du module PM ────────────────────
+// Format YYYY-MM-DD pour matching direct contre day_id_str.
+// Etendre au fur et a mesure, source : calendrier FOMC officiel.
+var array<string> fomc_dates = array.from("2025-01-29", "2025-03-19", "2025-05-07", "2025-06-18", "2025-07-30", "2025-09-17", "2025-10-29", "2025-12-10", "2026-01-28", "2026-03-18", "2026-04-29", "2026-06-17", "2026-07-29", "2026-09-16", "2026-10-28", "2026-12-09")
+
+// Test : la date Paris du bar courant correspond-elle a un FOMC ?
+f_is_fomc(y, m, d) =>
+    s = str.tostring(y) + "-" + (m < 10 ? "0" : "") + str.tostring(m) + "-" + (d < 10 ? "0" : "") + str.tostring(d)
+    array.includes(fomc_dates, s)
+
 // ── Palette de couleurs ──────────────────────────────────────────────────────
 // Reprise de v1.3 : couleurs uniformes avec l'indicateur JCO NY Amplitude Levels
 COL_GREEN  = #3fb950
@@ -254,6 +332,16 @@ COL_CLASS_O_MOYEN    = #C8A437
 COL_CLASS_O_ELEVE    = #E89B2D
 COL_CLASS_ROUGE_15h40 = #D67340   // alerte tardive
 COL_CLASS_ROUGE_15h20 = #D24545
+
+// Couleurs des 7 niveaux de classification PM, palette graduee (PDF v4)
+// PM utilise les memes 3 oranges que l'AM pour coherence inter-session.
+COL_CLASS_PM_VERT        = COL_CLASS_VERT
+COL_CLASS_PM_O_FAIBLE    = COL_CLASS_O_FAIBLE
+COL_CLASS_PM_O_MOYEN     = COL_CLASS_O_MOYEN
+COL_CLASS_PM_O_ELEVE     = COL_CLASS_O_ELEVE
+COL_CLASS_PM_ROUGE_18h40 = #D67340   // alerte tardive PM
+COL_CLASS_PM_ROUGE_18h20 = #D24545
+COL_CLASS_PM_ROUGE_FOMC  = #8B1A1A   // rouge fonce, FOMC = niveau le plus eleve
 
 // ── Helpers de formatage et de labelling ─────────────────────────────────────
 // Labels de classification. Les 3 niveaux Orange sont scindes sur 2 lignes
@@ -309,6 +397,60 @@ f_class_pexpl(c) =>
         4 => 13.9
         5 => 19.2
         6 => 88.9
+        => na
+
+// ── Helpers de labelling PM, 7 niveaux ───────────────────────────────────────
+// Mapping : 1=VERT 18h20, 2=ROUGE 18h20, 3-4-5=Orange faible/moyen/eleve,
+//           6=ROUGE 18h40, 7=ROUGE FOMC.
+f_class_pm_text(c) =>
+    switch c
+        1 => "VERT 18h20"
+        2 => "ROUGE 18h20"
+        3 => "Orange\nfaible"
+        4 => "Orange\nmoyen"
+        5 => "Orange\neleve"
+        6 => "ROUGE 18h40"
+        7 => "ROUGE FOMC"
+        => "—"
+
+f_class_pm_text_short(c) =>
+    switch c
+        1 => "VERT"
+        2 => "ROUGE"
+        3 => "Orange\nfaible"
+        4 => "Orange\nmoyen"
+        5 => "Orange\neleve"
+        6 => "ROUGE"
+        7 => "ROUGE\nFOMC"
+        => "—"
+
+f_class_pm_color(c) =>
+    switch c
+        1 => COL_CLASS_PM_VERT
+        2 => COL_CLASS_PM_ROUGE_18h20
+        3 => COL_CLASS_PM_O_FAIBLE
+        4 => COL_CLASS_PM_O_MOYEN
+        5 => COL_CLASS_PM_O_ELEVE
+        6 => COL_CLASS_PM_ROUGE_18h40
+        7 => COL_CLASS_PM_ROUGE_FOMC
+        => COL_GRAY
+
+f_class_pm_bg(c) =>
+    switch c
+        1 => color.new(COL_CLASS_PM_VERT,         85)
+        2 => color.new(COL_CLASS_PM_ROUGE_18h20,  80)
+        3 => color.new(COL_CLASS_PM_O_FAIBLE,     85)
+        4 => color.new(COL_CLASS_PM_O_MOYEN,      85)
+        5 => color.new(COL_CLASS_PM_O_ELEVE,      82)
+        6 => color.new(COL_CLASS_PM_ROUGE_18h40,  80)
+        7 => color.new(COL_CLASS_PM_ROUGE_FOMC,   75)
+        => DASH_BG
+
+// Probabilites d'explosion par classe PM (PDF v4 Section 6, valeurs a affiner).
+// Pour les classes sans valeur calibree fournie, retourne na (affiche "—").
+f_class_pm_pexpl(c) =>
+    switch c
+        4 => 20.0   // Orange moyen, valeur du mockup PDF v4
         => na
 
 f_weekday_name(d) =>
@@ -396,13 +538,31 @@ b2_close_utc        = f_paris_to_utc_min(time, b2_close_paris)
 ny_end_utc          = f_paris_to_utc_min(time, ny_end_paris)
 overnight_start_utc = f_paris_to_utc_min(time, overnight_start_par)
 
+// ── Horaires PM (module v2.2.0) ──────────────────────────────────────────────
+pre_pm_start_paris  = 17 * 60 + 20               // 1040 = 17h20 Paris, debut accumulation pre-PM
+am_pm_switch_paris  = 18 * 60                    // 1080 = 18h00 Paris, bascule visuelle dashboard
+pm_eval_paris       = 18 * 60 + 20               // 1100 = 18h20 Paris, evaluation PM PDF v4
+pm_open_paris       = 18 * 60 + 30               // 1110 = 18h30 Paris, ouverture session PM reelle
+pm_b2_close_paris   = 18 * 60 + 40               // 1120 = 18h40 Paris, B2 PM vient de fermer
+pm_end_paris        = 20 * 60 + 30               // 1230 = 20h30 Paris, fin session PM
+
+pre_pm_start_utc    = f_paris_to_utc_min(time, pre_pm_start_paris)
+am_pm_switch_utc    = f_paris_to_utc_min(time, am_pm_switch_paris)
+pm_eval_utc         = f_paris_to_utc_min(time, pm_eval_paris)
+pm_open_utc         = f_paris_to_utc_min(time, pm_open_paris)
+pm_b2_close_utc     = f_paris_to_utc_min(time, pm_b2_close_paris)
+pm_end_utc          = f_paris_to_utc_min(time, pm_end_paris)
+
 utc_h     = hour(time, "UTC")
 utc_m     = minute(time, "UTC")
 utc_total = utc_h * 60 + utc_m
 
 // Day tracking Paris : un day_id stable par jour calendaire Paris
 // Construit comme year*10000 + month*100 + dayofmonth, unique et sortable.
-day_id  = year(time, "Europe/Paris") * 10000 + month(time, "Europe/Paris") * 100 + dayofmonth(time, "Europe/Paris")
+paris_year  = year(time, "Europe/Paris")
+paris_month = month(time, "Europe/Paris")
+paris_dom   = dayofmonth(time, "Europe/Paris")
+day_id  = paris_year * 10000 + paris_month * 100 + paris_dom
 weekday = dayofweek(time, "Europe/Paris")   // Pine v6 : 1=Dim, 2=Lun, ..., 6=Ven, 7=Sam
 
 // ── Range structurel 14 jours via daily timeframe ────────────────────────────
@@ -469,6 +629,57 @@ var int  daily_reset_day = -1
 // Reset de la classification a 14h00 pour signaler "EN COURS"
 // La classification finale n'est etablie qu'a 15h20.
 
+// === DEBUT MODULE PM RISK ASSESSMENT v4 ============================================
+// Etat persistant specifique au module PM. Tout l'etat AM ci-dessus reste intact.
+
+// am_expl_today : booleen, l'AM du jour J a-t-il explose ?
+// Set a fire_ny_end (17h30) en meme temps que le push dans recent_expl_days.
+// Utilise comme levier par fire_pm_eval (18h20). Reset a fire_daily_reset.
+var bool am_expl_today = false
+
+// Accumulateur pre-PM 17h20 -> 18h20
+var float pre_pm_h = na
+var float pre_pm_l = na
+var float pre_pm_o = na
+var float pre_pm_c = na
+var bool  pre_pm_active = false
+var int   pre_pm_day = -1
+
+// Snapshot pre-PM, final a 18h20
+var float pre_pm_amp_pts = na
+var float pre_pm_net_pts = na
+
+// Storage des bougies PM 18h30 -> 20h25, ~24 bougies M5
+var array<float> pm_opens  = array.new<float>(0)
+var array<float> pm_highs  = array.new<float>(0)
+var array<float> pm_lows   = array.new<float>(0)
+var array<float> pm_closes = array.new<float>(0)
+
+// Snapshot eval PM, 18h20
+var float pm_eval_value      = na
+var float position_14d_pm_pts = na
+var int   pm_eval_day        = -1
+var int   expl_pm_count_5d   = 0
+var bool  is_fomc_today      = false
+
+// Snapshot 18h40, B2 PM fermee -> alerte tardive eventuelle
+var float pm_b12_range = na
+var int   pm_b1_dir = 0
+var int   pm_b2_dir = 0
+var int   pm_b2_close_day = -1
+
+// Detection c2 PM a 20h30 -> push dans l'historique des 5 derniers jours PM
+var array<bool> recent_pm_expl_days = array.new<bool>(0)
+var int   pm_end_day = -1
+
+// Score & classification PM
+var int  pm_score              = 0   // 0 a +5
+var int  classification_pm     = 0   // 0 = pas encore calcule, 1-7 = niveaux
+var int  classification_pm_18h20 = 0 // figee a 18h20, AVANT alerte tardive
+var bool pm_score_locked       = false
+
+// === FIN MODULE PM RISK ASSESSMENT v4 ============================================
+
 // ── Trigger 0 : reset journalier (1h00 Paris) ───────────────────────────────
 // Purge tous les verdicts et donnees de la veille, sauf les structures qui
 // doivent persister : recent_expl_days, am_*, on_active. La phase
@@ -489,6 +700,20 @@ if fire_daily_reset
     b12_aligned := false
     position_14d_pts := na
     expl_count_5d := 0
+    // Reset des variables PM, meme principe que pour l'AM
+    am_expl_today := false
+    pre_pm_amp_pts := na
+    pre_pm_net_pts := na
+    position_14d_pm_pts := na
+    expl_pm_count_5d := 0
+    is_fomc_today := false
+    pm_b12_range := na
+    pm_b1_dir := 0
+    pm_b2_dir := 0
+    classification_pm := 0
+    classification_pm_18h20 := 0
+    pm_score := 0
+    pm_score_locked := false
 
 // ── Trigger 1 : pre-NY start (14h00 Paris) ──────────────────────────────────
 fire_pre_ny_start = utc_total == pre_ny_start_utc and day_id != pre_ny_day
@@ -639,6 +864,142 @@ if fire_ny_end
     array.push(recent_expl_days, explosed_today)
     while array.size(recent_expl_days) > regime_window
         array.shift(recent_expl_days)
+    // Exposer au module PM le verdict c2 AM du jour, levier de pm_eval a 18h20
+    am_expl_today := explosed_today
+
+// === DEBUT MODULE PM RISK ASSESSMENT v4 ============================================
+// Triggers et calculs PM. Tout ce bloc est gate par enable_pm_module pour que
+// les calculs ne tournent meme pas en idle si le module est desactive.
+
+// ── Trigger PM-1 : pre-PM start (17h20 Paris) ───────────────────────────────
+fire_pre_pm_start = enable_pm_module and utc_total == pre_pm_start_utc and day_id != pre_pm_day
+if fire_pre_pm_start
+    pre_pm_day := day_id
+    pre_pm_active := true
+    pre_pm_h := high
+    pre_pm_l := low
+    pre_pm_o := open
+    pre_pm_c := close
+    // Reset des classifications PM, on entre en phase pre-PM
+    classification_pm := 0
+    classification_pm_18h20 := 0
+    pm_score_locked := false
+
+// Accumulation pre-PM 17h20 -> 18h20 exclu, soit 12 bougies M5 17h20..18h15
+if enable_pm_module and pre_pm_active and not fire_pre_pm_start and utc_total >= pre_pm_start_utc and utc_total < pm_eval_utc and day_id == pre_pm_day
+    pre_pm_h := math.max(pre_pm_h, high)
+    pre_pm_l := math.min(pre_pm_l, low)
+    pre_pm_c := close
+
+// ── Trigger PM-2 : evaluation PM 18h20 — calcul final & classification ──────
+fire_pm_eval = enable_pm_module and utc_total == pm_eval_utc and day_id != pm_eval_day
+if fire_pm_eval
+    pm_eval_day := day_id
+
+    // Snapshot pre-PM 17h20-18h20 : range et net cumules
+    pre_pm_amp_pts := pre_pm_active ? pre_pm_h - pre_pm_l : na
+    pre_pm_net_pts := pre_pm_active ? pre_pm_c - pre_pm_o : na
+    pre_pm_active := false
+
+    // Snapshot eval PM value et position dans le range 14 jours, base sur l'open
+    // de la bougie 18h20-18h25 (= prix a 18h20 pile)
+    pm_eval_value := open
+    range_14d_now_pm = high_14d - low_14d
+    position_14d_pm_pts := range_14d_now_pm > 0 ? (pm_eval_value - low_14d) / range_14d_now_pm * 100 : 50.0
+
+    // FOMC : test sur la date Paris du jour
+    is_fomc_today := f_is_fomc(paris_year, paris_month, paris_dom)
+
+    // Comptage des explosions PM dans la fenetre 5 jours
+    int pm_count = 0
+    if array.size(recent_pm_expl_days) > 0
+        for i = 0 to array.size(recent_pm_expl_days) - 1
+            if array.get(recent_pm_expl_days, i)
+                pm_count += 1
+    expl_pm_count_5d := pm_count
+
+    // Score composite PM, 5 leviers, plage 0-5
+    int sp = 0
+    if not na(pre_pm_amp_pts) and pre_pm_amp_pts >= threshold_pre_pm_amp
+        sp += 1
+    if not na(pre_pm_net_pts) and pre_pm_net_pts <= threshold_pre_pm_net
+        sp += 1
+    if am_expl_today
+        sp += 1
+    if expl_pm_count_5d >= threshold_pm_expl_5d
+        sp += 1
+    if not na(position_14d_pm_pts) and position_14d_pm_pts <= threshold_pm_pos_14d
+        sp += 1
+    pm_score := sp
+
+    // Classification PM : FOMC prioritaire, puis VERT, puis ROUGE 18h20,
+    // puis bandes du score.
+    int cp = 0
+    if is_fomc_today
+        cp := 7   // ROUGE FOMC, prioritaire sur tout
+    else if not na(pre_pm_amp_pts) and pre_pm_amp_pts <= threshold_pm_vert_amp and expl_pm_count_5d == 0
+        cp := 1   // VERT 18h20
+    else if not na(pre_pm_amp_pts) and not na(position_14d_pm_pts) and pre_pm_amp_pts >= threshold_pm_rouge_amp and position_14d_pm_pts <= threshold_pm_rouge_pos and am_expl_today
+        cp := 2   // ROUGE 18h20
+    else if pm_score <= 0
+        cp := 3   // Orange-faible
+    else if pm_score <= 2
+        cp := 4   // Orange-moyen
+    else
+        cp := 5   // Orange-eleve
+    classification_pm := cp
+    classification_pm_18h20 := cp  // copie figee, ne sera PAS modifiee par l'alerte 18h40
+    pm_score_locked := true
+
+    // Reset du storage PM pour la nouvelle session
+    array.clear(pm_opens)
+    array.clear(pm_highs)
+    array.clear(pm_lows)
+    array.clear(pm_closes)
+
+// ── Push des bougies PM (18h35 -> 20h30) ────────────────────────────────────
+// On push la donnee de la bougie PRECEDENTE (bar[1]) car elle est confirmee.
+push_pm = enable_pm_module and utc_total > pm_open_utc and utc_total <= pm_end_utc and day_id == pm_eval_day
+if push_pm
+    array.push(pm_opens,  open[1])
+    array.push(pm_highs,  high[1])
+    array.push(pm_lows,   low[1])
+    array.push(pm_closes, close[1])
+
+// ── Trigger PM-3 : B2 PM close (18h40) — alerte tardive eventuelle ──────────
+fire_pm_b2_close = enable_pm_module and utc_total == pm_b2_close_utc and day_id != pm_b2_close_day and day_id == pm_eval_day
+if fire_pm_b2_close
+    pm_b2_close_day := day_id
+    // B1 PM = bougie 18h30-18h35 (bar[2] sur le 18h40)
+    // B2 PM = bougie 18h35-18h40 (bar[1] sur le 18h40)
+    pmb1_h = high[2]
+    pmb1_l = low[2]
+    pmb2_h = high[1]
+    pmb2_l = low[1]
+    pm_b12_range := math.max(pmb1_h, pmb2_h) - math.min(pmb1_l, pmb2_l)
+
+    // Direction des corps B1/B2 pour affichage (pas de filtre alignement en PM)
+    body_pmb1 = close[2] - open[2]
+    body_pmb2 = close[1] - open[1]
+    pm_b1_dir := body_pmb1 > 0 ? 1 : body_pmb1 < 0 ? -1 : 0
+    pm_b2_dir := body_pmb2 > 0 ? 1 : body_pmb2 < 0 ? -1 : 0
+
+    // Bascule ROUGE 18h40 si classification etait Orange 3/4/5 et range >= seuil.
+    // PAS de condition d'alignement, difference cle vs AM PDF v4 Section 5.
+    pm_range_ok = pm_b12_range >= threshold_pm_rouge_18h40
+    if (classification_pm == 3 or classification_pm == 4 or classification_pm == 5) and pm_range_ok
+        classification_pm := 6   // ROUGE 18h40
+
+// ── Trigger PM-4 : PM end (20h30) — detection c2 + push historique ──────────
+fire_pm_end = enable_pm_module and utc_total == pm_end_utc and day_id != pm_end_day and day_id == pm_eval_day
+if fire_pm_end
+    pm_end_day := day_id
+    pm_explosed_today = f_detect_explosion_c2(pm_opens, pm_highs, pm_lows, pm_closes, pm_explosion_threshold, explosion_max_contraries)
+    array.push(recent_pm_expl_days, pm_explosed_today)
+    while array.size(recent_pm_expl_days) > regime_window
+        array.shift(recent_pm_expl_days)
+
+// === FIN MODULE PM RISK ASSESSMENT v4 ============================================
 
 // ── Score provisoire pendant la pre-NY 14h00 -> 15h20 ───────────────────────
 // On recalcule a chaque bougie avec les valeurs partielles de pre_amp/pre_net
@@ -677,6 +1038,39 @@ if in_pre_ny_window
     position_14d_pts := prov_pos_14d
     score_locked := false
 
+// ── Score provisoire PM pendant la pre-PM 17h20 -> 18h20 ────────────────────
+// Mise a jour live des leviers PM pour que le dashboard PM montre des valeurs
+// partielles entre la bascule visuelle 18h00 et l'eval 18h20.
+in_pre_pm_window = enable_pm_module and pre_pm_active and utc_total >= pre_pm_start_utc and utc_total < pm_eval_utc and day_id == pre_pm_day
+if in_pre_pm_window
+    prov_pre_pm_amp = pre_pm_h - pre_pm_l
+    prov_pre_pm_net = pre_pm_c - pre_pm_o
+    range_14d_now_pm_prov = high_14d - low_14d
+    prov_pos_14d_pm = range_14d_now_pm_prov > 0 ? (close - low_14d) / range_14d_now_pm_prov * 100 : 50.0
+    int prov_pm_count = 0
+    if array.size(recent_pm_expl_days) > 0
+        for i = 0 to array.size(recent_pm_expl_days) - 1
+            if array.get(recent_pm_expl_days, i)
+                prov_pm_count += 1
+    expl_pm_count_5d := prov_pm_count
+    // Score provisoire PM, 5 leviers comme la version finale, sans is_fomc
+    int sp_prov = 0
+    if prov_pre_pm_amp >= threshold_pre_pm_amp
+        sp_prov += 1
+    if prov_pre_pm_net <= threshold_pre_pm_net
+        sp_prov += 1
+    if am_expl_today
+        sp_prov += 1
+    if prov_pm_count >= threshold_pm_expl_5d
+        sp_prov += 1
+    if prov_pos_14d_pm <= threshold_pm_pos_14d
+        sp_prov += 1
+    pm_score := sp_prov
+    pre_pm_amp_pts := prov_pre_pm_amp
+    pre_pm_net_pts := prov_pre_pm_net
+    position_14d_pm_pts := prov_pos_14d_pm
+    pm_score_locked := false
+
 // ── Score structurel (entre 1h00 et 14h00, avant la pre-NY) ─────────────────
 // Recalcul continu du score avec les 3 leviers stables uniquement :
 //   weekday, expl_count_5d, position_14d (estimee via close en proxy)
@@ -703,226 +1097,359 @@ if in_structural_window
         s += 1
     score := s
 
+// ── Bascule visuelle AM / PM ─────────────────────────────────────────────────
+// active_session determine quelle table afficher. PM uniquement si le module est
+// active ET (on est dans la fenetre 18h00-20h30 OU on a fait l'eval PM du jour).
+// L'eval PM est persistante jusqu'au reset 1h00 : on garde donc le panneau PM
+// affiche apres 20h30 jusqu'a minuit, puis retombe en AM.
+is_pm_window = enable_pm_module and utc_total >= am_pm_switch_utc and utc_total < pm_end_utc
+pm_session_done = enable_pm_module and pm_eval_day == day_id and not is_pm_window
+is_pm_visible = is_pm_window or pm_session_done
+active_session = is_pm_visible ? "PM" : "AM"
+
 // ── Dashboard ────────────────────────────────────────────────────────────────
-// Mode Masque : pas d'affichage. Mode Complet : 13 lignes. Mode Simplifie : 3 lignes.
-// Les deux modes ajoutent dash_padding lignes transparentes en bas pour empiler
-// un dashboard secondaire au meme coin (typiquement JCO NY Amplitude Levels).
+// Mode Masque : pas d'affichage. Mode Complet : 13 lignes AM ou 14 lignes PM.
+// Mode Simplifie : 5 lignes. Les modes Complets ajoutent dash_padding lignes
+// transparentes en bas pour empiler un dashboard secondaire au meme coin.
 if dash_mode != "Masque" and barstate.islast
-    // Couleur de fond du panneau : reflet de la classification COURANTE,
-    // incluant une eventuelle bascule ROUGE 15h40. Permet la lecture
-    // visuelle rapide de l'urgence.
-    panel_bg = f_class_bg(classification)
+    // ── Variables communes AM ─────────────────────────────────────────────
+    panel_bg_am = f_class_bg(classification)
 
     // Etat verdict 15h20, fige a l'evaluation, ne bouge pas a 15h40
-    // Label selon la phase :
-    //   - classification connue : nom de la classe (VERT, Orange-X, ROUGE)
-    //   - phase provisoire 14h00-15h20 : "EN COURS"
-    //   - phase structurelle 1h00-14h00 : "Structurel"
-    //   - sinon : tiret (chargement initial, ou entre 22h et 1h)
     in_structural_phase = day_id == daily_reset_day and not pre_active and classification == 0
     class_15h20_txt = classification_15h20 == 0 ? (in_pre_ny_window ? "EN COURS" : (in_structural_phase ? "Structurel" : "—")) : f_class_text(classification_15h20)
     class_15h20_col = f_class_color(classification_15h20)
     pexpl_15h20 = f_class_pexpl(classification_15h20)
 
-    // Etat ajuste apres bascule 15h40 eventuelle, visible a partir de 15h40
-    // Utilise f_class_text_short pour ne pas afficher le suffixe horaire,
-    // incompatible avec les semaines de transition DST.
+    // Etat ajuste apres bascule 15h40 eventuelle
     past_b2_close = day_id == b2_close_day
     adj_txt = past_b2_close ? f_class_text_short(classification) : "—"
     adj_col = past_b2_close ? f_class_color(classification) : COL_GRAY
 
-    // Activation des leviers du score (pour les ticks ✓/✗ du detail)
+    // Activation des leviers AM, pour ticks ✓/✗ du detail
     lev_pre_amp = not na(pre_amp_pts) and pre_amp_pts >= threshold_pre_amp_score
     lev_pre_net = not na(pre_net_pts) and pre_net_pts <= threshold_pre_net_score
     lev_weekday = f_weekday_lever(weekday)
     lev_expl_5d = expl_count_5d >= threshold_expl_5d
     lev_pos_14d = not na(position_14d_pts) and position_14d_pts <= threshold_position_14d
 
-    // Etat detaille de l'alerte tardive (visible a partir de 15h40)
+    // Alerte tardive AM
     b12_avail        = day_id == b2_close_day
     b12_range_ok     = b12_avail and b12_range >= threshold_rouge_15h40
     b12_range_text   = b12_avail ? f_fmt_pts(b12_range) : "—"
     b12_dir_text     = b12_avail ? ("B1" + f_dir_arrow(b1_dir) + " B2" + f_dir_arrow(b2_dir)) : "—"
     b12_align_active = b12_avail and b12_aligned
 
+    // ── Variables communes PM ─────────────────────────────────────────────
+    panel_bg_pm = f_class_pm_bg(classification_pm)
+
+    // Etat PM verdict 18h20
+    pm_pre_active_now = enable_pm_module and pre_pm_active and utc_total < pm_eval_utc
+    class_pm_18h20_txt = classification_pm_18h20 == 0 ? (pm_pre_active_now ? "EN COURS" : "—") : f_class_pm_text(classification_pm_18h20)
+    class_pm_18h20_col = f_class_pm_color(classification_pm_18h20)
+    pexpl_pm_18h20 = f_class_pm_pexpl(classification_pm_18h20)
+
+    // Etat ajuste PM, apres bascule 18h40
+    past_pm_b2_close = day_id == pm_b2_close_day
+    pm_adj_txt = past_pm_b2_close ? f_class_pm_text_short(classification_pm) : "—"
+    pm_adj_col = past_pm_b2_close ? f_class_pm_color(classification_pm) : COL_GRAY
+
+    // Activation des leviers PM
+    lev_pre_pm_amp = not na(pre_pm_amp_pts) and pre_pm_amp_pts >= threshold_pre_pm_amp
+    lev_pre_pm_net = not na(pre_pm_net_pts) and pre_pm_net_pts <= threshold_pre_pm_net
+    lev_am_expl    = am_expl_today
+    lev_pm_expl_5d = expl_pm_count_5d >= threshold_pm_expl_5d
+    lev_pm_pos_14d = not na(position_14d_pm_pts) and position_14d_pm_pts <= threshold_pm_pos_14d
+
+    // Alerte tardive PM
+    pm_b12_avail      = day_id == pm_b2_close_day
+    pm_b12_range_ok   = pm_b12_avail and pm_b12_range >= threshold_pm_rouge_18h40
+    pm_b12_range_text = pm_b12_avail ? f_fmt_pts(pm_b12_range) : "—"
+    pm_b12_dir_text   = pm_b12_avail ? ("B1" + f_dir_arrow(pm_b1_dir) + " B2" + f_dir_arrow(pm_b2_dir)) : "—"
+
+    // Couleur de fond du panneau selon session active
+    panel_bg = active_session == "PM" ? panel_bg_pm : panel_bg_am
+
+    // Rappel cross-session
+    // En session AM : afficher l'etat PM a venir si module active, sinon tiret
+    // En session PM : afficher l'etat AM fige (toujours visible apres 15h20)
+    am_ref_txt = classification_15h20 == 0 ? "—" : f_class_text_short(classification_15h20)
+    am_ref_col = classification_15h20 == 0 ? COL_GRAY : f_class_color(classification_15h20)
+    pm_ref_txt = not enable_pm_module ? "off" : (classification_pm_18h20 == 0 ? "à venir" : f_class_pm_text_short(classification_pm_18h20))
+    pm_ref_col = not enable_pm_module ? COL_GRAY : (classification_pm_18h20 == 0 ? COL_GRAY : f_class_pm_color(classification_pm_18h20))
+
     if dash_mode == "Complet" and dash_show_thresholds
-        // ─── MODE COMPLET 3 COLONNES : Label | Valeur | Indicateur seuil ────
-        var table tbl_full = table.new(position.bottom_right, 3, 13 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        // ═══ MODE COMPLET 3 COLONNES ════════════════════════════════════════
+        // 14 lignes : 13 specifiques a la session + 1 ligne cross-session
+        var table tbl_full = table.new(position.bottom_right, 3, 14 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-        // Ligne 0 : Etat verdict 15h20, fige
-        table.cell(tbl_full, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-        table.cell(tbl_full, 2, 0, "",                bgcolor=panel_bg, text_size=size.small)
+        if active_session != "PM"
+            // ─── Session AM ─────────────────────────────────────────────────
+            // Ligne 0 : Etat AM
+            table.cell(tbl_full, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_full, 2, 0, "",                bgcolor=panel_bg, text_size=size.small)
 
-        // Ligne 1 : Score
-        table.cell(tbl_full, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-        table.cell(tbl_full, 2, 1, "",                     bgcolor=panel_bg, text_size=size.small)
+            // Ligne 1 : Score
+            table.cell(tbl_full, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_full, 2, 1, "",                     bgcolor=panel_bg, text_size=size.small)
 
-        // Ligne 2 : P(expl)
-        table.cell(tbl_full, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-        table.cell(tbl_full, 2, 2, "",                       bgcolor=panel_bg, text_size=size.small)
+            // Ligne 2 : P(expl)
+            table.cell(tbl_full, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_full, 2, 2, "",                       bgcolor=panel_bg, text_size=size.small)
 
-        // Ligne 3 : separateur
-        table.cell(tbl_full, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-        table.cell(tbl_full, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-        table.cell(tbl_full, 2, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+            // Ligne 3 : separateur
+            table.cell(tbl_full, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 3, "", bgcolor=panel_bg, text_size=size.tiny)
 
-        // Ligne 4 : pre_amp
-        table.cell(tbl_full, 0, 4, "pre_amp",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 4, f_check_mark(lev_pre_amp) + " (>= " + str.tostring(threshold_pre_amp_score) + ")", bgcolor=panel_bg, text_color=lev_pre_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 4 : pre_amp
+            table.cell(tbl_full, 0, 4, "pre_amp",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 4, f_check_mark(lev_pre_amp) + " (>= " + str.tostring(threshold_pre_amp_score) + ")", bgcolor=panel_bg, text_color=lev_pre_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // Ligne 5 : pre_net
-        table.cell(tbl_full, 0, 5, "pre_net",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_net) + " (<= " + str.tostring(threshold_pre_net_score) + ")", bgcolor=panel_bg, text_color=lev_pre_net ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 5 : pre_net
+            table.cell(tbl_full, 0, 5, "pre_net",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_net) + " (<= " + str.tostring(threshold_pre_net_score) + ")", bgcolor=panel_bg, text_color=lev_pre_net ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // Ligne 6 : weekday
-        table.cell(tbl_full, 0, 6, "weekday",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 6, f_weekday_name(weekday),            bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 6, f_fmt_signed(lev_weekday),          bgcolor=panel_bg, text_color=lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 6 : weekday
+            table.cell(tbl_full, 0, 6, "weekday",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 6, f_weekday_name(weekday),            bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 6, f_fmt_signed(lev_weekday),          bgcolor=panel_bg, text_color=lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // Ligne 7 : expl_5d
-        table.cell(tbl_full, 0, 7, "expl_5d",                                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 7, str.tostring(expl_count_5d),               bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 7, f_check_mark(lev_expl_5d) + " (>= " + str.tostring(threshold_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 7 : expl_5d
+            table.cell(tbl_full, 0, 7, "expl_5d",                                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 7, str.tostring(expl_count_5d),               bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 7, f_check_mark(lev_expl_5d) + " (>= " + str.tostring(threshold_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // Ligne 8 : pos_14d
-        table.cell(tbl_full, 0, 8, "pos_14d",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 8, f_fmt_pct1(position_14d_pts),       bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 8, f_check_mark(lev_pos_14d) + " (<= " + str.tostring(threshold_position_14d) + "%)", bgcolor=panel_bg, text_color=lev_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 8 : pos_14d
+            table.cell(tbl_full, 0, 8, "pos_14d",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 8, f_fmt_pct1(position_14d_pts),       bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 8, f_check_mark(lev_pos_14d) + " (<= " + str.tostring(threshold_position_14d) + "%)", bgcolor=panel_bg, text_color=lev_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // Ligne 9 : separateur
-        table.cell(tbl_full, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-        table.cell(tbl_full, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-        table.cell(tbl_full, 2, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+            // Ligne 9 : separateur
+            table.cell(tbl_full, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 9, "", bgcolor=panel_bg, text_size=size.tiny)
 
-        // Ligne 10 : b12 range (range cumule des 2 premieres bougies AM)
-        table.cell(tbl_full, 0, 10, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 10, b12_range_text,   bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 10, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h40) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 10 : b12 range
+            table.cell(tbl_full, 0, 10, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 10, b12_range_text,   bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 10, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h40) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-        // Ligne 11 : b12 align (direction des corps B1 et B2)
-        table.cell(tbl_full, 0, 11, "b12 align",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 11, b12_dir_text,     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-        table.cell(tbl_full, 2, 11, b12_avail ? f_check_mark(b12_align_active) : "", bgcolor=panel_bg, text_color=b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY), text_size=size.small)
+            // Ligne 11 : b12 align
+            table.cell(tbl_full, 0, 11, "b12 align",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 11, b12_dir_text,     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 11, b12_avail ? f_check_mark(b12_align_active) : "", bgcolor=panel_bg, text_color=b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY), text_size=size.small)
 
-        // Ligne 12 : Etat ajuste (vert/rouge/orange-X apres 15h40, sinon tiret)
-        table.cell(tbl_full, 0, 12, "Etat ajuste",    bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_full, 1, 12, adj_txt,          bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
-        table.cell(tbl_full, 2, 12, "",               bgcolor=panel_bg, text_size=size.small)
+            // Ligne 12 : Etat ajuste AM
+            table.cell(tbl_full, 0, 12, "Etat ajuste",    bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 12, adj_txt,          bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+            table.cell(tbl_full, 2, 12, "",               bgcolor=panel_bg, text_size=size.small)
 
-        // Lignes de padding transparent
+            // Ligne 13 : Cross-session — Etat PM a venir
+            table.cell(tbl_full, 0, 13, "Etat PM",        bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 13, pm_ref_txt,       bgcolor=panel_bg, text_color=pm_ref_col, text_size=size.small)
+            table.cell(tbl_full, 2, 13, "",               bgcolor=panel_bg, text_size=size.small)
+        else
+            // ─── Session PM ─────────────────────────────────────────────────
+            // Ligne 0 : Cross-session — Etat AM fige
+            table.cell(tbl_full, 0, 0, "Etat AM",         bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 0, am_ref_txt,        bgcolor=panel_bg, text_color=am_ref_col,  text_size=size.small)
+            table.cell(tbl_full, 2, 0, "",                bgcolor=panel_bg, text_size=size.small)
+
+            // Ligne 1 : Etat PM, juste sous Etat AM
+            table.cell(tbl_full, 0, 1, "Etat PM",             bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 1, class_pm_18h20_txt,    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_full, 2, 1, "",                    bgcolor=panel_bg, text_size=size.small)
+
+            // Ligne 2 : Score PM
+            table.cell(tbl_full, 0, 2, "Score",                   bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 2, f_fmt_signed(pm_score),    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_full, 2, 2, "",                        bgcolor=panel_bg, text_size=size.small)
+
+            // Ligne 3 : P(expl) PM
+            table.cell(tbl_full, 0, 3, "P(expl)",                    bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 3, f_fmt_pct1(pexpl_pm_18h20),   bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_full, 2, 3, "",                           bgcolor=panel_bg, text_size=size.small)
+
+            // Ligne 4 : separateur
+            table.cell(tbl_full, 0, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+
+            // Ligne 5 : pre_pm_amp
+            table.cell(tbl_full, 0, 5, "pre_pm_amp",              bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 5, f_fmt_pts(pre_pm_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_pm_amp) + " (>= " + str.tostring(threshold_pre_pm_amp) + ")", bgcolor=panel_bg, text_color=lev_pre_pm_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+            // Ligne 6 : pre_pm_net
+            table.cell(tbl_full, 0, 6, "pre_pm_net",              bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 6, f_fmt_pts(pre_pm_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 6, f_check_mark(lev_pre_pm_net) + " (<= " + str.tostring(threshold_pre_pm_net) + ")", bgcolor=panel_bg, text_color=lev_pre_pm_net ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+            // Ligne 7 : am_expl
+            table.cell(tbl_full, 0, 7, "am_expl",                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 7, am_expl_today ? "True" : "False", bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 7, f_check_mark(lev_am_expl), bgcolor=panel_bg, text_color=lev_am_expl ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+            // Ligne 8 : expl_pm_5d
+            table.cell(tbl_full, 0, 8, "expl_pm_5d",                       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 8, str.tostring(expl_pm_count_5d),     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 8, f_check_mark(lev_pm_expl_5d) + " (>= " + str.tostring(threshold_pm_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_pm_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+            // Ligne 9 : pos_14d_pm
+            table.cell(tbl_full, 0, 9, "pos_14d_pm",                       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 9, f_fmt_pct1(position_14d_pm_pts),    bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 9, f_check_mark(lev_pm_pos_14d) + " (<= " + str.tostring(threshold_pm_pos_14d) + "%)", bgcolor=panel_bg, text_color=lev_pm_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+            // Ligne 10 : is_fomc
+            table.cell(tbl_full, 0, 10, "is_fomc",                                   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 10, is_fomc_today ? "True" : "False",            bgcolor=panel_bg, text_color=is_fomc_today ? COL_RED : COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 10, is_fomc_today ? f_check_mark(true) : "",     bgcolor=panel_bg, text_color=COL_RED, text_size=size.small)
+
+            // Ligne 11 : separateur, isole la confirmation finale
+            table.cell(tbl_full, 0, 11, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 11, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 11, "", bgcolor=panel_bg, text_size=size.tiny)
+
+            // Ligne 12 : b12 range PM
+            table.cell(tbl_full, 0, 12, "b12 range",       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 12, pm_b12_range_text, bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 12, pm_b12_avail ? (f_check_mark(pm_b12_range_ok) + " (>= " + str.tostring(threshold_pm_rouge_18h40) + ")") : "", bgcolor=panel_bg, text_color=pm_b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
+
+            // Ligne 13 : Etat ajuste PM
+            table.cell(tbl_full, 0, 13, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 13, pm_adj_txt,        bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
+            table.cell(tbl_full, 2, 13, "",                bgcolor=panel_bg, text_size=size.small)
+
+        // Lignes de padding transparent (commun AM/PM)
         if dash_padding > 0
-            for r = 13 to 13 + dash_padding - 1
+            for r = 14 to 14 + dash_padding - 1
                 for c = 0 to 2
                     table.cell(tbl_full, c, r, "", text_size=size.small)
 
     if dash_mode == "Complet" and not dash_show_thresholds
-        // ─── MODE COMPLET 2 COLONNES : Label | Valeur coloree selon levier ──
-        // La couleur de chaque valeur de levier indique son statut :
-        //   - vert  : levier active (contribue au score, sauf weekday lundi)
-        //   - rouge : weekday jeudi/vendredi (lever +1, donc augmente le risque)
-        //   - vert  : weekday lundi (lever -1, donc reduit le risque)
-        //   - gris  : levier non active / neutre
-        var table tbl_compact = table.new(position.bottom_right, 2, 13 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        // ═══ MODE COMPLET 2 COLONNES ════════════════════════════════════════
+        // 14 lignes, sans 3e colonne, couleur des leviers indique validation
+        var table tbl_compact = table.new(position.bottom_right, 2, 14 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-        // Couleurs des leviers (col 1)
-        col_pre_amp = lev_pre_amp ? COL_GREEN : COL_GRAY
-        col_pre_net = lev_pre_net ? COL_GREEN : COL_GRAY
-        col_weekday = lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY
-        col_expl_5d = lev_expl_5d ? COL_GREEN : COL_GRAY
-        col_pos_14d = lev_pos_14d ? COL_GREEN : COL_GRAY
+        if active_session != "PM"
+            // ─── Session AM ─────────────────────────────────────────────────
+            col_pre_amp = lev_pre_amp ? COL_GREEN : COL_GRAY
+            col_pre_net = lev_pre_net ? COL_GREEN : COL_GRAY
+            col_weekday = lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY
+            col_expl_5d = lev_expl_5d ? COL_GREEN : COL_GRAY
+            col_pos_14d = lev_pos_14d ? COL_GREEN : COL_GRAY
+            col_b12_range = b12_range_ok ? COL_GREEN : COL_GRAY
+            col_b12_align = b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY)
 
-        // Ligne 0 : Etat
-        table.cell(tbl_compact, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 4, "pre_amp",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=col_pre_amp, text_size=size.small)
+            table.cell(tbl_compact, 0, 5, "pre_net",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=col_pre_net, text_size=size.small)
+            table.cell(tbl_compact, 0, 6, "weekday",                bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 6, f_weekday_name(weekday),  bgcolor=panel_bg, text_color=col_weekday, text_size=size.small)
+            table.cell(tbl_compact, 0, 7, "expl_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 7, str.tostring(expl_count_5d),     bgcolor=panel_bg, text_color=col_expl_5d, text_size=size.small)
+            table.cell(tbl_compact, 0, 8, "pos_14d",                  bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 8, f_fmt_pct1(position_14d_pts), bgcolor=panel_bg, text_color=col_pos_14d, text_size=size.small)
+            table.cell(tbl_compact, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 10, "b12 range",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 10, b12_range_text,  bgcolor=panel_bg, text_color=col_b12_range, text_size=size.small)
+            table.cell(tbl_compact, 0, 11, "b12 align",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 11, b12_dir_text,    bgcolor=panel_bg, text_color=col_b12_align, text_size=size.small)
+            table.cell(tbl_compact, 0, 12, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 12, adj_txt,         bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+            table.cell(tbl_compact, 0, 13, "Etat PM",       bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 13, pm_ref_txt,      bgcolor=panel_bg, text_color=pm_ref_col, text_size=size.small)
+        else
+            // ─── Session PM ─────────────────────────────────────────────────
+            col_pre_pm_amp = lev_pre_pm_amp ? COL_GREEN : COL_GRAY
+            col_pre_pm_net = lev_pre_pm_net ? COL_GREEN : COL_GRAY
+            col_am_expl    = lev_am_expl    ? COL_GREEN : COL_GRAY
+            col_pm_expl_5d = lev_pm_expl_5d ? COL_GREEN : COL_GRAY
+            col_pm_pos_14d = lev_pm_pos_14d ? COL_GREEN : COL_GRAY
+            col_pm_b12     = pm_b12_range_ok ? COL_GREEN : COL_GRAY
+            col_is_fomc    = is_fomc_today ? COL_RED : COL_GRAY
 
-        // Ligne 1 : Score
-        table.cell(tbl_compact, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 0, "Etat AM",        bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 0, am_ref_txt,       bgcolor=panel_bg, text_color=am_ref_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 1, "Etat PM",             bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 1, class_pm_18h20_txt,    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 2, "Score",                   bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 2, f_fmt_signed(pm_score),    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 3, "P(expl)",                  bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 3, f_fmt_pct1(pexpl_pm_18h20), bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 5, "pre_pm_amp",              bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_pm_amp_pts), bgcolor=panel_bg, text_color=col_pre_pm_amp, text_size=size.small)
+            table.cell(tbl_compact, 0, 6, "pre_pm_net",              bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 6, f_fmt_pts(pre_pm_net_pts), bgcolor=panel_bg, text_color=col_pre_pm_net, text_size=size.small)
+            table.cell(tbl_compact, 0, 7, "am_expl",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 7, am_expl_today ? "True" : "False", bgcolor=panel_bg, text_color=col_am_expl, text_size=size.small)
+            table.cell(tbl_compact, 0, 8, "expl_pm_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 8, str.tostring(expl_pm_count_5d),     bgcolor=panel_bg, text_color=col_pm_expl_5d, text_size=size.small)
+            table.cell(tbl_compact, 0, 9, "pos_14d_pm",                       bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 9, f_fmt_pct1(position_14d_pm_pts),    bgcolor=panel_bg, text_color=col_pm_pos_14d, text_size=size.small)
+            table.cell(tbl_compact, 0, 10, "is_fomc",                          bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 10, is_fomc_today ? "True" : "False",   bgcolor=panel_bg, text_color=col_is_fomc, text_size=size.small)
+            table.cell(tbl_compact, 0, 11, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 11, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 12, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 12, pm_b12_range_text, bgcolor=panel_bg, text_color=col_pm_b12, text_size=size.small)
+            table.cell(tbl_compact, 0, 13, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 13, pm_adj_txt,      bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
 
-        // Ligne 2 : P(expl)
-        table.cell(tbl_compact, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-
-        // Ligne 3 : separateur
-        table.cell(tbl_compact, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-        table.cell(tbl_compact, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-
-        // Ligne 4 : pre_amp
-        table.cell(tbl_compact, 0, 4, "pre_amp",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=col_pre_amp, text_size=size.small)
-
-        // Ligne 5 : pre_net
-        table.cell(tbl_compact, 0, 5, "pre_net",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=col_pre_net, text_size=size.small)
-
-        // Ligne 6 : weekday
-        table.cell(tbl_compact, 0, 6, "weekday",                bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 6, f_weekday_name(weekday),  bgcolor=panel_bg, text_color=col_weekday, text_size=size.small)
-
-        // Ligne 7 : expl_5d
-        table.cell(tbl_compact, 0, 7, "expl_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 7, str.tostring(expl_count_5d),     bgcolor=panel_bg, text_color=col_expl_5d, text_size=size.small)
-
-        // Ligne 8 : pos_14d
-        table.cell(tbl_compact, 0, 8, "pos_14d",                  bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 8, f_fmt_pct1(position_14d_pts), bgcolor=panel_bg, text_color=col_pos_14d, text_size=size.small)
-
-        // Ligne 9 : separateur
-        table.cell(tbl_compact, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-        table.cell(tbl_compact, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-
-        // Couleurs des cellules b12 (mode compact)
-        col_b12_range = b12_range_ok ? COL_GREEN : (b12_avail ? COL_GRAY : COL_GRAY)
-        col_b12_align = b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY)
-
-        // Ligne 10 : b12 range
-        table.cell(tbl_compact, 0, 10, "b12 range",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 10, b12_range_text,  bgcolor=panel_bg, text_color=col_b12_range, text_size=size.small)
-
-        // Ligne 11 : b12 align (direction des corps B1 et B2)
-        table.cell(tbl_compact, 0, 11, "b12 align",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 11, b12_dir_text,    bgcolor=panel_bg, text_color=col_b12_align, text_size=size.small)
-
-        // Ligne 12 : Etat ajuste
-        table.cell(tbl_compact, 0, 12, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_compact, 1, 12, adj_txt,         bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
-
-        // Lignes de padding transparent
         if dash_padding > 0
-            for r = 13 to 13 + dash_padding - 1
+            for r = 14 to 14 + dash_padding - 1
                 for c = 0 to 1
                     table.cell(tbl_compact, c, r, "", text_size=size.small)
 
     if dash_mode == "Simplifie"
-        // ─── MODE SIMPLIFIE : 2 colonnes x 4 lignes (+ padding) ─────────────
-        // Titre / Etat 15h20 / P(expl) / Etat ajuste a partir de 15h40
-        // Les variables class_15h20_txt, class_15h20_col, pexpl_15h20,
-        // adj_txt, adj_col sont definies dans le scope commun en amont.
-        var table tbl_s = table.new(position.bottom_right, 2, 4 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
+        // ═══ MODE SIMPLIFIE : 2 colonnes x 5 lignes (+ padding) ═════════════
+        // AM : NY AM titre / Etat AM / P(expl) AM / Etat ajusté AM / Etat PM
+        // PM : NY PM titre / Etat AM (figé) / Etat PM / P(expl) PM / Etat ajusté PM
+        var table tbl_s = table.new(position.bottom_right, 2, 5 + dash_padding, bgcolor=color.new(color.gray, 100), border_width=0)
 
-        // Ligne 0 : titre, split sur 2 colonnes pour gagner en largeur
-        table.cell(tbl_s, 0, 0, "NY AM",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 0, "risk expl", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small)
-
-        // Ligne 1 : Etat 15h20
-        table.cell(tbl_s, 0, 1, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 1, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-
-        // Ligne 2 : P(expl)
-        table.cell(tbl_s, 0, 2, "P(expl)",                 bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_15h20),   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-
-        // Ligne 3 : Etat ajuste (a partir de 15h40, sans suffixe horaire)
-        table.cell(tbl_s, 0, 3, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-        table.cell(tbl_s, 1, 3, adj_txt,           bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+        if active_session != "PM"
+            table.cell(tbl_s, 0, 0, "NY AM",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 0, "risk expl", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small)
+            table.cell(tbl_s, 0, 1, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 1, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_s, 0, 2, "P(expl)",                 bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_15h20),   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_s, 0, 3, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 3, adj_txt,           bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+            table.cell(tbl_s, 0, 4, "Etat PM",         bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 4, pm_ref_txt,        bgcolor=panel_bg, text_color=pm_ref_col, text_size=size.small)
+        else
+            table.cell(tbl_s, 0, 0, "NY PM",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 0, "risk expl", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small)
+            table.cell(tbl_s, 0, 1, "Etat AM",         bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 1, am_ref_txt,        bgcolor=panel_bg, text_color=am_ref_col, text_size=size.small)
+            table.cell(tbl_s, 0, 2, "Etat PM",             bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 2, class_pm_18h20_txt,    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_s, 0, 3, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 3, f_fmt_pct1(pexpl_pm_18h20), bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_s, 0, 4, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 4, pm_adj_txt,        bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
 
         if dash_padding > 0
-            for r = 4 to 4 + dash_padding - 1
+            for r = 5 to 5 + dash_padding - 1
                 for c = 0 to 1
                     table.cell(tbl_s, c, r, "", text_size=size.small)
 
