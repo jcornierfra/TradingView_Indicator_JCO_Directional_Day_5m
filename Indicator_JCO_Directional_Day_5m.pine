@@ -1,7 +1,7 @@
 // This Pine Script™ code is subject to the terms of the Mozilla Public License 2.0 at https://mozilla.org/MPL/2.0/
 // © jcornier
 //
-// Version: 2.2.0
+// Version: 2.2.1
 // GitHub: https://github.com/jcornierfra/TradingView_Indicator_JCO_Directional_Day_5m
 //
 // Description: Indicateur Risk Assessment NY AM + NY PM bati sur deux etudes
@@ -68,12 +68,17 @@
 //              voir l'autre verdict de la journee (Etat AM fige sur le
 //              panneau PM, Etat PM a venir sur le panneau AM).
 //                - Masque    : pas d'affichage
-//                - Complet   : 14 lignes. AM 3-col : Etat / Score / P(expl) /
-//                              sep / 5 leviers / sep / b12 range / b12 align /
-//                              Etat ajuste / Etat PM. PM 3-col : Etat AM /
-//                              Etat PM / Score / P(expl) / sep / 6 leviers /
-//                              sep / b12 range / Etat ajuste. Variante 2-col
-//                              avec couleur des leviers indiquant validation.
+//                - Complet   : 14 lignes. Verdict regroupe en haut, leviers
+//                              au milieu, preuves de bascule en bas.
+//                              AM 3-col : Etat / Score / P(expl) / Etat ajuste
+//                              / sep / 5 leviers / sep / b12 range / b12 align
+//                              / Etat PM. PM 3-col : Etat AM / Etat PM / Score
+//                              / P(expl) / Etat ajuste / sep / 6 leviers / sep
+//                              / b12 range. Variante 2-col avec couleur des
+//                              leviers indiquant validation. Score et P(expl)
+//                              refletent la classification courante (couleur
+//                              et valeur ajustees apres bascule ROUGE 15h40
+//                              ou ROUGE 18h40).
 //                - Simplifie : 5 lignes (titre / Etat session active /
 //                              P(expl) / Etat ajuste / Etat autre session)
 //              Padding configurable pour empiler avec un dashboard secondaire.
@@ -95,6 +100,22 @@
 //   le critere c2 est rempli. Si oui, le jour est marque "explose".
 //
 // Changelog:
+//   v2.2.1 - 2026-05-12
+//     - UX dashboard Complet : Score et P(expl) refletent maintenant la
+//       classification COURANTE et non plus le verdict 15h20/18h20 fige.
+//       Avant bascule, classification == classification_15h20/18h20 donc
+//       comportement identique. Apres bascule ROUGE 15h40/18h40, Score
+//       et P(expl) prennent la nouvelle couleur (corail) et P(expl) la
+//       proba ajustee (88.9% au lieu de 13.9% pour Orange-moyen -> ROUGE
+//       15h40 par exemple). Permet de voir le "nouveau risque" instantane.
+//       Le libelle "Etat" reste fige a 15h20/18h20 pour la tracabilite.
+//     - UX dashboard Complet : "Etat ajuste" deplace de la fin du tableau
+//       vers juste sous P(expl). Le bloc verdict (Etat fige / Score / P(expl)
+//       / Etat ajuste) est ainsi regroupe en haut. Leviers au milieu,
+//       b12 range + align (preuves de la bascule) en bas du tableau.
+//     - Variables ajoutees : class_current_col, pexpl_current (AM),
+//       class_pm_current_col, pexpl_pm_current (PM).
+//
 //   v2.2.0 - 2026-05-12
 //     - Extension : module Risk Assessment NY PM. Source PDF v4
 //       "NQ Anticipation NY PM Score v4" (334 jours, recall ROUGES 51%).
@@ -1119,7 +1140,13 @@ if dash_mode != "Masque" and barstate.islast
     in_structural_phase = day_id == daily_reset_day and not pre_active and classification == 0
     class_15h20_txt = classification_15h20 == 0 ? (in_pre_ny_window ? "EN COURS" : (in_structural_phase ? "Structurel" : "—")) : f_class_text(classification_15h20)
     class_15h20_col = f_class_color(classification_15h20)
-    pexpl_15h20 = f_class_pexpl(classification_15h20)
+
+    // Couleur courante + P(expl) courante, refletent l'ajustement post-15h40
+    // Avant l'alerte tardive, classification == classification_15h20 -> identique.
+    // Apres bascule ROUGE 15h40, le Score et P(expl) prennent la nouvelle couleur
+    // et la probabilite de la classe finale (88.9% pour ROUGE 15h40).
+    class_current_col = f_class_color(classification)
+    pexpl_current = f_class_pexpl(classification)
 
     // Etat ajuste apres bascule 15h40 eventuelle
     past_b2_close = day_id == b2_close_day
@@ -1147,7 +1174,10 @@ if dash_mode != "Masque" and barstate.islast
     pm_pre_active_now = enable_pm_module and pre_pm_active and utc_total < pm_eval_utc
     class_pm_18h20_txt = classification_pm_18h20 == 0 ? (pm_pre_active_now ? "EN COURS" : "—") : f_class_pm_text(classification_pm_18h20)
     class_pm_18h20_col = f_class_pm_color(classification_pm_18h20)
-    pexpl_pm_18h20 = f_class_pm_pexpl(classification_pm_18h20)
+
+    // Couleur courante + P(expl) courante PM, refletent l'ajustement post-18h40
+    class_pm_current_col = f_class_pm_color(classification_pm)
+    pexpl_pm_current = f_class_pm_pexpl(classification_pm)
 
     // Etat ajuste PM, apres bascule 18h40
     past_pm_b2_close = day_id == pm_b2_close_day
@@ -1185,70 +1215,73 @@ if dash_mode != "Masque" and barstate.islast
 
         if active_session != "PM"
             // ─── Session AM ─────────────────────────────────────────────────
-            // Ligne 0 : Etat AM
+            // Bloc verdict en haut : Etat fige / Score / P(expl) / Etat ajuste
+            // Leviers au milieu, b12 range + align en bas comme preuves de l'ajustement.
+
+            // Ligne 0 : Etat AM, verdict 15h20 fige
             table.cell(tbl_full, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_full, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
             table.cell(tbl_full, 2, 0, "",                bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 1 : Score
-            table.cell(tbl_full, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            // Ligne 1 : Score, couleur ajustee si bascule ROUGE 15h40
+            table.cell(tbl_full, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,         text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_current_col, text_size=size.small)
             table.cell(tbl_full, 2, 1, "",                     bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 2 : P(expl)
-            table.cell(tbl_full, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            // Ligne 2 : P(expl), valeur et couleur ajustees si bascule ROUGE 15h40
+            table.cell(tbl_full, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,         text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 2, f_fmt_pct1(pexpl_current), bgcolor=panel_bg, text_color=class_current_col, text_size=size.small)
             table.cell(tbl_full, 2, 2, "",                       bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 3 : separateur
-            table.cell(tbl_full, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 2, 3, "", bgcolor=panel_bg, text_size=size.tiny)
+            // Ligne 3 : Etat ajuste, juste sous P(expl) pour grouper le verdict ajuste
+            table.cell(tbl_full, 0, 3, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 3, adj_txt,           bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+            table.cell(tbl_full, 2, 3, "",                bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 4 : pre_amp
-            table.cell(tbl_full, 0, 4, "pre_amp",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 4, f_check_mark(lev_pre_amp) + " (>= " + str.tostring(threshold_pre_amp_score) + ")", bgcolor=panel_bg, text_color=lev_pre_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 4 : separateur
+            table.cell(tbl_full, 0, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 4, "", bgcolor=panel_bg, text_size=size.tiny)
 
-            // Ligne 5 : pre_net
-            table.cell(tbl_full, 0, 5, "pre_net",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_net) + " (<= " + str.tostring(threshold_pre_net_score) + ")", bgcolor=panel_bg, text_color=lev_pre_net ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 5 : pre_amp
+            table.cell(tbl_full, 0, 5, "pre_amp",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 5, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_amp) + " (>= " + str.tostring(threshold_pre_amp_score) + ")", bgcolor=panel_bg, text_color=lev_pre_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 6 : weekday
-            table.cell(tbl_full, 0, 6, "weekday",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 6, f_weekday_name(weekday),            bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 6, f_fmt_signed(lev_weekday),          bgcolor=panel_bg, text_color=lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 6 : pre_net
+            table.cell(tbl_full, 0, 6, "pre_net",            bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 6, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 6, f_check_mark(lev_pre_net) + " (<= " + str.tostring(threshold_pre_net_score) + ")", bgcolor=panel_bg, text_color=lev_pre_net ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 7 : expl_5d
-            table.cell(tbl_full, 0, 7, "expl_5d",                                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 7, str.tostring(expl_count_5d),               bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 7, f_check_mark(lev_expl_5d) + " (>= " + str.tostring(threshold_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 7 : weekday
+            table.cell(tbl_full, 0, 7, "weekday",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 7, f_weekday_name(weekday),            bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 7, f_fmt_signed(lev_weekday),          bgcolor=panel_bg, text_color=lev_weekday > 0 ? COL_RED : lev_weekday < 0 ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 8 : pos_14d
-            table.cell(tbl_full, 0, 8, "pos_14d",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 8, f_fmt_pct1(position_14d_pts),       bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 8, f_check_mark(lev_pos_14d) + " (<= " + str.tostring(threshold_position_14d) + "%)", bgcolor=panel_bg, text_color=lev_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 8 : expl_5d
+            table.cell(tbl_full, 0, 8, "expl_5d",                                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 8, str.tostring(expl_count_5d),               bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 8, f_check_mark(lev_expl_5d) + " (>= " + str.tostring(threshold_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 9 : separateur
-            table.cell(tbl_full, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 2, 9, "", bgcolor=panel_bg, text_size=size.tiny)
+            // Ligne 9 : pos_14d
+            table.cell(tbl_full, 0, 9, "pos_14d",                          bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 9, f_fmt_pct1(position_14d_pts),       bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 9, f_check_mark(lev_pos_14d) + " (<= " + str.tostring(threshold_position_14d) + "%)", bgcolor=panel_bg, text_color=lev_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 10 : b12 range
-            table.cell(tbl_full, 0, 10, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 10, b12_range_text,   bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 10, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h40) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 10 : separateur, isole les preuves de l'ajustement
+            table.cell(tbl_full, 0, 10, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 10, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 10, "", bgcolor=panel_bg, text_size=size.tiny)
 
-            // Ligne 11 : b12 align
-            table.cell(tbl_full, 0, 11, "b12 align",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 11, b12_dir_text,     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 11, b12_avail ? f_check_mark(b12_align_active) : "", bgcolor=panel_bg, text_color=b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY), text_size=size.small)
+            // Ligne 11 : b12 range
+            table.cell(tbl_full, 0, 11, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 11, b12_range_text,   bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 11, b12_avail ? (f_check_mark(b12_range_ok) + " (>= " + str.tostring(threshold_rouge_15h40) + ")") : "", bgcolor=panel_bg, text_color=b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 12 : Etat ajuste AM
-            table.cell(tbl_full, 0, 12, "Etat ajuste",    bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 12, adj_txt,          bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
-            table.cell(tbl_full, 2, 12, "",               bgcolor=panel_bg, text_size=size.small)
+            // Ligne 12 : b12 align
+            table.cell(tbl_full, 0, 12, "b12 align",      bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 12, b12_dir_text,     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 12, b12_avail ? f_check_mark(b12_align_active) : "", bgcolor=panel_bg, text_color=b12_align_active ? COL_GREEN : (b12_avail ? COL_RED : COL_GRAY), text_size=size.small)
 
             // Ligne 13 : Cross-session — Etat PM a venir
             table.cell(tbl_full, 0, 13, "Etat PM",        bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
@@ -1256,6 +1289,10 @@ if dash_mode != "Masque" and barstate.islast
             table.cell(tbl_full, 2, 13, "",               bgcolor=panel_bg, text_size=size.small)
         else
             // ─── Session PM ─────────────────────────────────────────────────
+            // Bloc verdict en haut : Etat AM cross-session / Etat PM / Score /
+            // P(expl) / Etat ajuste. Leviers au milieu, b12 range en bas comme
+            // preuve de l'ajustement.
+
             // Ligne 0 : Cross-session — Etat AM fige
             table.cell(tbl_full, 0, 0, "Etat AM",         bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_full, 1, 0, am_ref_txt,        bgcolor=panel_bg, text_color=am_ref_col,  text_size=size.small)
@@ -1266,65 +1303,65 @@ if dash_mode != "Masque" and barstate.islast
             table.cell(tbl_full, 1, 1, class_pm_18h20_txt,    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
             table.cell(tbl_full, 2, 1, "",                    bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 2 : Score PM
-            table.cell(tbl_full, 0, 2, "Score",                   bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 2, f_fmt_signed(pm_score),    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            // Ligne 2 : Score PM, couleur ajustee si bascule ROUGE 18h40
+            table.cell(tbl_full, 0, 2, "Score",                   bgcolor=panel_bg, text_color=COL_GRAY,            text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 2, f_fmt_signed(pm_score),    bgcolor=panel_bg, text_color=class_pm_current_col, text_size=size.small)
             table.cell(tbl_full, 2, 2, "",                        bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 3 : P(expl) PM
-            table.cell(tbl_full, 0, 3, "P(expl)",                    bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 3, f_fmt_pct1(pexpl_pm_18h20),   bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            // Ligne 3 : P(expl) PM, valeur et couleur ajustees si bascule ROUGE 18h40
+            table.cell(tbl_full, 0, 3, "P(expl)",                    bgcolor=panel_bg, text_color=COL_GRAY,            text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 3, f_fmt_pct1(pexpl_pm_current), bgcolor=panel_bg, text_color=class_pm_current_col, text_size=size.small)
             table.cell(tbl_full, 2, 3, "",                           bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 4 : separateur
-            table.cell(tbl_full, 0, 4, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 1, 4, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 2, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            // Ligne 4 : Etat ajuste PM, juste sous P(expl) pour grouper le verdict ajuste
+            table.cell(tbl_full, 0, 4, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 4, pm_adj_txt,        bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
+            table.cell(tbl_full, 2, 4, "",                bgcolor=panel_bg, text_size=size.small)
 
-            // Ligne 5 : pre_pm_amp
-            table.cell(tbl_full, 0, 5, "pre_pm_amp",              bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 5, f_fmt_pts(pre_pm_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 5, f_check_mark(lev_pre_pm_amp) + " (>= " + str.tostring(threshold_pre_pm_amp) + ")", bgcolor=panel_bg, text_color=lev_pre_pm_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 5 : separateur
+            table.cell(tbl_full, 0, 5, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 5, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 5, "", bgcolor=panel_bg, text_size=size.tiny)
 
-            // Ligne 6 : pre_pm_net
-            table.cell(tbl_full, 0, 6, "pre_pm_net",              bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 6, f_fmt_pts(pre_pm_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 6, f_check_mark(lev_pre_pm_net) + " (<= " + str.tostring(threshold_pre_pm_net) + ")", bgcolor=panel_bg, text_color=lev_pre_pm_net ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 6 : pre_pm_amp
+            table.cell(tbl_full, 0, 6, "pre_pm_amp",              bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 6, f_fmt_pts(pre_pm_amp_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 6, f_check_mark(lev_pre_pm_amp) + " (>= " + str.tostring(threshold_pre_pm_amp) + ")", bgcolor=panel_bg, text_color=lev_pre_pm_amp ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 7 : am_expl
-            table.cell(tbl_full, 0, 7, "am_expl",                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 7, am_expl_today ? "True" : "False", bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 7, f_check_mark(lev_am_expl), bgcolor=panel_bg, text_color=lev_am_expl ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 7 : pre_pm_net
+            table.cell(tbl_full, 0, 7, "pre_pm_net",              bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 7, f_fmt_pts(pre_pm_net_pts), bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 7, f_check_mark(lev_pre_pm_net) + " (<= " + str.tostring(threshold_pre_pm_net) + ")", bgcolor=panel_bg, text_color=lev_pre_pm_net ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 8 : expl_pm_5d
-            table.cell(tbl_full, 0, 8, "expl_pm_5d",                       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 8, str.tostring(expl_pm_count_5d),     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 8, f_check_mark(lev_pm_expl_5d) + " (>= " + str.tostring(threshold_pm_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_pm_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 8 : am_expl
+            table.cell(tbl_full, 0, 8, "am_expl",                  bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 8, am_expl_today ? "True" : "False", bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 8, f_check_mark(lev_am_expl), bgcolor=panel_bg, text_color=lev_am_expl ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 9 : pos_14d_pm
-            table.cell(tbl_full, 0, 9, "pos_14d_pm",                       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 9, f_fmt_pct1(position_14d_pm_pts),    bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 9, f_check_mark(lev_pm_pos_14d) + " (<= " + str.tostring(threshold_pm_pos_14d) + "%)", bgcolor=panel_bg, text_color=lev_pm_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 9 : expl_pm_5d
+            table.cell(tbl_full, 0, 9, "expl_pm_5d",                       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 9, str.tostring(expl_pm_count_5d),     bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 9, f_check_mark(lev_pm_expl_5d) + " (>= " + str.tostring(threshold_pm_expl_5d) + ")", bgcolor=panel_bg, text_color=lev_pm_expl_5d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 10 : is_fomc
-            table.cell(tbl_full, 0, 10, "is_fomc",                                   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 10, is_fomc_today ? "True" : "False",            bgcolor=panel_bg, text_color=is_fomc_today ? COL_RED : COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 10, is_fomc_today ? f_check_mark(true) : "",     bgcolor=panel_bg, text_color=COL_RED, text_size=size.small)
+            // Ligne 10 : pos_14d_pm
+            table.cell(tbl_full, 0, 10, "pos_14d_pm",                       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 10, f_fmt_pct1(position_14d_pm_pts),    bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 10, f_check_mark(lev_pm_pos_14d) + " (<= " + str.tostring(threshold_pm_pos_14d) + "%)", bgcolor=panel_bg, text_color=lev_pm_pos_14d ? COL_GREEN : COL_GRAY, text_size=size.small)
 
-            // Ligne 11 : separateur, isole la confirmation finale
-            table.cell(tbl_full, 0, 11, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 1, 11, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_full, 2, 11, "", bgcolor=panel_bg, text_size=size.tiny)
+            // Ligne 11 : is_fomc
+            table.cell(tbl_full, 0, 11, "is_fomc",                                   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 11, is_fomc_today ? "True" : "False",            bgcolor=panel_bg, text_color=is_fomc_today ? COL_RED : COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 11, is_fomc_today ? f_check_mark(true) : "",     bgcolor=panel_bg, text_color=COL_RED, text_size=size.small)
 
-            // Ligne 12 : b12 range PM
-            table.cell(tbl_full, 0, 12, "b12 range",       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 12, pm_b12_range_text, bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
-            table.cell(tbl_full, 2, 12, pm_b12_avail ? (f_check_mark(pm_b12_range_ok) + " (>= " + str.tostring(threshold_pm_rouge_18h40) + ")") : "", bgcolor=panel_bg, text_color=pm_b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
+            // Ligne 12 : separateur, isole la preuve de l'ajustement
+            table.cell(tbl_full, 0, 12, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 1, 12, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_full, 2, 12, "", bgcolor=panel_bg, text_size=size.tiny)
 
-            // Ligne 13 : Etat ajuste PM
-            table.cell(tbl_full, 0, 13, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_full, 1, 13, pm_adj_txt,        bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
-            table.cell(tbl_full, 2, 13, "",                bgcolor=panel_bg, text_size=size.small)
+            // Ligne 13 : b12 range PM
+            table.cell(tbl_full, 0, 13, "b12 range",       bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_full, 1, 13, pm_b12_range_text, bgcolor=panel_bg, text_color=COL_BLUE, text_size=size.small)
+            table.cell(tbl_full, 2, 13, pm_b12_avail ? (f_check_mark(pm_b12_range_ok) + " (>= " + str.tostring(threshold_pm_rouge_18h40) + ")") : "", bgcolor=panel_bg, text_color=pm_b12_range_ok ? COL_GREEN : COL_GRAY, text_size=size.small)
 
         // Lignes de padding transparent (commun AM/PM)
         if dash_padding > 0
@@ -1349,30 +1386,30 @@ if dash_mode != "Masque" and barstate.islast
 
             table.cell(tbl_compact, 0, 0, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_compact, 1, 0, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-            table.cell(tbl_compact, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-            table.cell(tbl_compact, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_15h20),  bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-            table.cell(tbl_compact, 0, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 1, 3, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 0, 4, "pre_amp",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 4, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=col_pre_amp, text_size=size.small)
-            table.cell(tbl_compact, 0, 5, "pre_net",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=col_pre_net, text_size=size.small)
-            table.cell(tbl_compact, 0, 6, "weekday",                bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 6, f_weekday_name(weekday),  bgcolor=panel_bg, text_color=col_weekday, text_size=size.small)
-            table.cell(tbl_compact, 0, 7, "expl_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 7, str.tostring(expl_count_5d),     bgcolor=panel_bg, text_color=col_expl_5d, text_size=size.small)
-            table.cell(tbl_compact, 0, 8, "pos_14d",                  bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 8, f_fmt_pct1(position_14d_pts), bgcolor=panel_bg, text_color=col_pos_14d, text_size=size.small)
-            table.cell(tbl_compact, 0, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 1, 9, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 0, 10, "b12 range",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 10, b12_range_text,  bgcolor=panel_bg, text_color=col_b12_range, text_size=size.small)
-            table.cell(tbl_compact, 0, 11, "b12 align",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 11, b12_dir_text,    bgcolor=panel_bg, text_color=col_b12_align, text_size=size.small)
-            table.cell(tbl_compact, 0, 12, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 12, adj_txt,         bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+            table.cell(tbl_compact, 0, 1, "Score",                bgcolor=panel_bg, text_color=COL_GRAY,         text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 1, f_fmt_signed(score),    bgcolor=panel_bg, text_color=class_current_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 2, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,         text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 2, f_fmt_pct1(pexpl_current), bgcolor=panel_bg, text_color=class_current_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 3, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 3, adj_txt,         bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
+            table.cell(tbl_compact, 0, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 4, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 5, "pre_amp",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_amp_pts), bgcolor=panel_bg, text_color=col_pre_amp, text_size=size.small)
+            table.cell(tbl_compact, 0, 6, "pre_net",              bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 6, f_fmt_pts(pre_net_pts), bgcolor=panel_bg, text_color=col_pre_net, text_size=size.small)
+            table.cell(tbl_compact, 0, 7, "weekday",                bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 7, f_weekday_name(weekday),  bgcolor=panel_bg, text_color=col_weekday, text_size=size.small)
+            table.cell(tbl_compact, 0, 8, "expl_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 8, str.tostring(expl_count_5d),     bgcolor=panel_bg, text_color=col_expl_5d, text_size=size.small)
+            table.cell(tbl_compact, 0, 9, "pos_14d",                  bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 9, f_fmt_pct1(position_14d_pts), bgcolor=panel_bg, text_color=col_pos_14d, text_size=size.small)
+            table.cell(tbl_compact, 0, 10, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 10, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 11, "b12 range",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 11, b12_range_text,  bgcolor=panel_bg, text_color=col_b12_range, text_size=size.small)
+            table.cell(tbl_compact, 0, 12, "b12 align",     bgcolor=panel_bg, text_color=COL_GRAY,      text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 12, b12_dir_text,    bgcolor=panel_bg, text_color=col_b12_align, text_size=size.small)
             table.cell(tbl_compact, 0, 13, "Etat PM",       bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_compact, 1, 13, pm_ref_txt,      bgcolor=panel_bg, text_color=pm_ref_col, text_size=size.small)
         else
@@ -1389,30 +1426,30 @@ if dash_mode != "Masque" and barstate.islast
             table.cell(tbl_compact, 1, 0, am_ref_txt,       bgcolor=panel_bg, text_color=am_ref_col, text_size=size.small)
             table.cell(tbl_compact, 0, 1, "Etat PM",             bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_compact, 1, 1, class_pm_18h20_txt,    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
-            table.cell(tbl_compact, 0, 2, "Score",                   bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 2, f_fmt_signed(pm_score),    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
-            table.cell(tbl_compact, 0, 3, "P(expl)",                  bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 3, f_fmt_pct1(pexpl_pm_18h20), bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
-            table.cell(tbl_compact, 0, 4, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 1, 4, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 0, 5, "pre_pm_amp",              bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 5, f_fmt_pts(pre_pm_amp_pts), bgcolor=panel_bg, text_color=col_pre_pm_amp, text_size=size.small)
-            table.cell(tbl_compact, 0, 6, "pre_pm_net",              bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 6, f_fmt_pts(pre_pm_net_pts), bgcolor=panel_bg, text_color=col_pre_pm_net, text_size=size.small)
-            table.cell(tbl_compact, 0, 7, "am_expl",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 7, am_expl_today ? "True" : "False", bgcolor=panel_bg, text_color=col_am_expl, text_size=size.small)
-            table.cell(tbl_compact, 0, 8, "expl_pm_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 8, str.tostring(expl_pm_count_5d),     bgcolor=panel_bg, text_color=col_pm_expl_5d, text_size=size.small)
-            table.cell(tbl_compact, 0, 9, "pos_14d_pm",                       bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 9, f_fmt_pct1(position_14d_pm_pts),    bgcolor=panel_bg, text_color=col_pm_pos_14d, text_size=size.small)
-            table.cell(tbl_compact, 0, 10, "is_fomc",                          bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 10, is_fomc_today ? "True" : "False",   bgcolor=panel_bg, text_color=col_is_fomc, text_size=size.small)
-            table.cell(tbl_compact, 0, 11, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 1, 11, "", bgcolor=panel_bg, text_size=size.tiny)
-            table.cell(tbl_compact, 0, 12, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 12, pm_b12_range_text, bgcolor=panel_bg, text_color=col_pm_b12, text_size=size.small)
-            table.cell(tbl_compact, 0, 13, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_compact, 1, 13, pm_adj_txt,      bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 2, "Score",                   bgcolor=panel_bg, text_color=COL_GRAY,            text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 2, f_fmt_signed(pm_score),    bgcolor=panel_bg, text_color=class_pm_current_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 3, "P(expl)",                  bgcolor=panel_bg, text_color=COL_GRAY,            text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 3, f_fmt_pct1(pexpl_pm_current), bgcolor=panel_bg, text_color=class_pm_current_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 4, "Etat ajuste",   bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 4, pm_adj_txt,      bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
+            table.cell(tbl_compact, 0, 5, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 5, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 6, "pre_pm_amp",              bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 6, f_fmt_pts(pre_pm_amp_pts), bgcolor=panel_bg, text_color=col_pre_pm_amp, text_size=size.small)
+            table.cell(tbl_compact, 0, 7, "pre_pm_net",              bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 7, f_fmt_pts(pre_pm_net_pts), bgcolor=panel_bg, text_color=col_pre_pm_net, text_size=size.small)
+            table.cell(tbl_compact, 0, 8, "am_expl",                       bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 8, am_expl_today ? "True" : "False", bgcolor=panel_bg, text_color=col_am_expl, text_size=size.small)
+            table.cell(tbl_compact, 0, 9, "expl_pm_5d",                       bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 9, str.tostring(expl_pm_count_5d),     bgcolor=panel_bg, text_color=col_pm_expl_5d, text_size=size.small)
+            table.cell(tbl_compact, 0, 10, "pos_14d_pm",                       bgcolor=panel_bg, text_color=COL_GRAY,       text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 10, f_fmt_pct1(position_14d_pm_pts),    bgcolor=panel_bg, text_color=col_pm_pos_14d, text_size=size.small)
+            table.cell(tbl_compact, 0, 11, "is_fomc",                          bgcolor=panel_bg, text_color=COL_GRAY,    text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 11, is_fomc_today ? "True" : "False",   bgcolor=panel_bg, text_color=col_is_fomc, text_size=size.small)
+            table.cell(tbl_compact, 0, 12, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 1, 12, "", bgcolor=panel_bg, text_size=size.tiny)
+            table.cell(tbl_compact, 0, 13, "b12 range",      bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_compact, 1, 13, pm_b12_range_text, bgcolor=panel_bg, text_color=col_pm_b12, text_size=size.small)
 
         if dash_padding > 0
             for r = 14 to 14 + dash_padding - 1
@@ -1430,8 +1467,8 @@ if dash_mode != "Masque" and barstate.islast
             table.cell(tbl_s, 1, 0, "risk expl", bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small)
             table.cell(tbl_s, 0, 1, "Etat",            bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_s, 1, 1, class_15h20_txt,   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
-            table.cell(tbl_s, 0, 2, "P(expl)",                 bgcolor=panel_bg, text_color=COL_GRAY,        text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_15h20),   bgcolor=panel_bg, text_color=class_15h20_col, text_size=size.small)
+            table.cell(tbl_s, 0, 2, "P(expl)",                 bgcolor=panel_bg, text_color=COL_GRAY,         text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 2, f_fmt_pct1(pexpl_current), bgcolor=panel_bg, text_color=class_current_col, text_size=size.small)
             table.cell(tbl_s, 0, 3, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY, text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_s, 1, 3, adj_txt,           bgcolor=panel_bg, text_color=adj_col,  text_size=size.small)
             table.cell(tbl_s, 0, 4, "Etat PM",         bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
@@ -1443,8 +1480,8 @@ if dash_mode != "Masque" and barstate.islast
             table.cell(tbl_s, 1, 1, am_ref_txt,        bgcolor=panel_bg, text_color=am_ref_col, text_size=size.small)
             table.cell(tbl_s, 0, 2, "Etat PM",             bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_s, 1, 2, class_pm_18h20_txt,    bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
-            table.cell(tbl_s, 0, 3, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,           text_size=size.small, text_halign=text.align_left)
-            table.cell(tbl_s, 1, 3, f_fmt_pct1(pexpl_pm_18h20), bgcolor=panel_bg, text_color=class_pm_18h20_col, text_size=size.small)
+            table.cell(tbl_s, 0, 3, "P(expl)",                bgcolor=panel_bg, text_color=COL_GRAY,            text_size=size.small, text_halign=text.align_left)
+            table.cell(tbl_s, 1, 3, f_fmt_pct1(pexpl_pm_current), bgcolor=panel_bg, text_color=class_pm_current_col, text_size=size.small)
             table.cell(tbl_s, 0, 4, "Etat ajuste",     bgcolor=panel_bg, text_color=COL_GRAY,   text_size=size.small, text_halign=text.align_left)
             table.cell(tbl_s, 1, 4, pm_adj_txt,        bgcolor=panel_bg, text_color=pm_adj_col, text_size=size.small)
 

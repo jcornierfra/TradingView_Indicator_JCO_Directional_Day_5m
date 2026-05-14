@@ -145,6 +145,7 @@ Etat AM     │ Orange-moyen   │
 Etat PM     │ ROUGE 18h20    │
 Score       │ +4             │
 P(expl)     │ —              │
+Etat ajuste │ —              │
 ─────────────────────────────────
 pre_pm_amp  │ 253 pts        │ ✓ (>= 140)
 pre_pm_net  │ −180 pts       │ ✓ (<= −100)
@@ -154,7 +155,6 @@ pos_14d_pm  │ −46.0%         │ ✓ (<= 30%)
 is_fomc     │ False          │
 ─────────────────────────────────
 b12 range   │ —              │
-Etat ajuste │ —
 ```
 
 Pour le module PM désactivé, le dashboard reste exactement comme en v2.1.0 (aucune bascule, aucune référence PM).
@@ -340,6 +340,18 @@ Toutes les autres bornes temporelles (reset 1h00, pré-NY 14h00, évaluation 15h
 ---
 
 ## Changelog
+
+### v2.2.1 - 2026-05-12
+
+**Améliorations UX du dashboard Complet** (3-col et 2-col, AM et PM).
+
+- **Score et P(expl) refletent maintenant la classification courante** au lieu du verdict figé 15h20/18h20. Avant bascule, comportement identique. Après bascule ROUGE 15h40 ou ROUGE 18h40 :
+  - **Score** garde sa valeur numérique mais prend la couleur rouge corail
+  - **P(expl)** passe à la probabilité ajustée (ex: 13.9% Orange-moyen → **88.9%** ROUGE 15h40)
+  - Donne instantanément le "nouveau risque réel" sans avoir à scroller jusqu'à `Etat ajusté`
+- **Ligne "Etat ajusté" déplacée** de la fin du tableau à juste sous P(expl). Le bloc verdict (Etat figé / Score / P(expl) / Etat ajusté) est ainsi regroupé en haut. Leviers au milieu, b12 range/align (preuves de la bascule) en bas.
+
+Le libellé "Etat" reste figé à 15h20/18h20 pour garder la traçabilité du verdict initial. Aucun changement de logique business.
 
 ### v2.2.0 - 2026-05-12
 
